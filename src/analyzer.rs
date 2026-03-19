@@ -716,17 +716,22 @@ pub fn analyze_slot_boundaries(multi: &MultiCollatorLogs) -> SlotBoundaryAnalysi
 			let rp = bas[0].relay_parent_num;
 			let first_build_time = bas.iter().map(|ba| ba.timestamp).min().unwrap();
 
-			// Get heights built
-			let heights: BTreeSet<u32> = bas
-				.iter()
-				.map(|ba| ba.included_num + ba.unincluded_segment_len + 1)
-				.collect();
+			// Get heights from PreSealed events (actual sealed blocks, not attempted builds)
+			let heights: BTreeSet<u32> = sealed_by_slot
+				.get(&slot)
+				.map(|seals| seals.iter().map(|ps| ps.block_number).collect())
+				.unwrap_or_default();
 
 			// Get last seal time
 			let last_seal_time = sealed_by_slot
 				.get(&slot)
 				.and_then(|seals| seals.iter().map(|ps| ps.timestamp).max())
 				.unwrap_or(first_build_time);
+
+			// Skip slots where no blocks were actually sealed
+			if heights.is_empty() {
+				continue;
+			}
 
 			bursts.push(SlotBurst {
 				slot,
