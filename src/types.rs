@@ -480,10 +480,61 @@ pub struct CollatorStats {
 	pub win_rate: f64,
 }
 
+/// A slot boundary transition between two collators.
+#[derive(Clone, Debug)]
+pub struct SlotBoundaryDetail {
+	/// Aura slot of the outgoing collator.
+	pub outgoing_slot: u64,
+	/// Aura slot of the incoming collator.
+	pub incoming_slot: u64,
+	/// Name of the outgoing collator.
+	pub outgoing_collator: String,
+	/// Name of the incoming collator.
+	pub incoming_collator: String,
+	/// Time when the outgoing collator sealed its last block (Pre-sealed timestamp).
+	pub outgoing_seal_time: DateTime<Utc>,
+	/// Time when the incoming collator started building its first block.
+	pub incoming_build_time: DateTime<Utc>,
+	/// Propagation gap: incoming_build_time - outgoing_seal_time.
+	/// Negative means the incoming started BEFORE the outgoing sealed (overlap).
+	pub propagation_gap_ms: i64,
+	/// Number of para block heights where both collators built a block.
+	pub overlap_count: u32,
+	/// Relay parent used by the outgoing collator.
+	pub outgoing_rp: u32,
+	/// Relay parent used by the incoming collator.
+	pub incoming_rp: u32,
+}
+
+/// Aggregate slot boundary analysis.
+#[derive(Clone, Debug)]
+pub struct SlotBoundaryAnalysis {
+	pub boundaries: Vec<SlotBoundaryDetail>,
+	/// Number of boundaries with overlap (overlap_count > 0).
+	pub boundaries_with_overlap: usize,
+	/// Number of boundaries without overlap.
+	pub boundaries_without_overlap: usize,
+	/// Average propagation gap across all boundaries (ms).
+	pub avg_propagation_gap_ms: f64,
+	/// Median propagation gap (ms).
+	pub median_propagation_gap_ms: i64,
+	/// Min propagation gap (most negative = worst overlap).
+	pub min_propagation_gap_ms: i64,
+	/// Max propagation gap.
+	pub max_propagation_gap_ms: i64,
+	/// Average overlap count per boundary (for boundaries with overlap).
+	pub avg_overlap_count: f64,
+	/// Max overlap count at any single boundary.
+	pub max_overlap_count: u32,
+	/// Number of boundaries where the RP jumped by more than 1 (possible relay fork).
+	pub relay_parent_gaps: usize,
+}
+
 /// Summary of rebuild analysis across all collators.
 pub struct MultiCollatorAnalysis {
 	pub per_collator: Vec<CollatorStats>,
 	pub rebuilds: Vec<RebuildEvent>,
+	pub slot_boundary_analysis: Option<SlotBoundaryAnalysis>,
 }
 
 /// Inline hex module to avoid adding a dependency.

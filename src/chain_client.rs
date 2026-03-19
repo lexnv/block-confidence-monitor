@@ -1,12 +1,16 @@
 use crate::types::*;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use subxt::backend::legacy::LegacyRpcMethods;
 use subxt::config::substrate::H256;
 use subxt::ext::subxt_rpcs::RpcClient;
 use subxt::{dynamic::Value, OnlineClient, PolkadotConfig};
 use tokio::sync::Semaphore;
+
+const MAX_RETRIES: u32 = 3;
+const RETRY_BASE_MS: u64 = 500;
 
 type ScaleValue = subxt::ext::scale_value::Value<u32>;
 type ScaleComposite = subxt::ext::scale_value::Composite<u32>;
@@ -130,6 +134,7 @@ impl ChainClient {
 		blocks: &[u32],
 	) -> Result<BTreeMap<u32, OnChainBlockInfo>> {
 		let mut results = BTreeMap::new();
+		let rpc_failures = Arc::new(AtomicU32::new(0));
 
 		let mut handles = Vec::new();
 		for &block_num in blocks {
@@ -137,58 +142,90 @@ impl ChainClient {
 			let rpc = LegacyRpcMethods::<PolkadotConfig>::new(self.rpc_client.clone());
 			let para_id = self.para_id;
 			let sem = self.semaphore.clone();
+			let failures = rpc_failures.clone();
 
 			handles.push(tokio::spawn(async move {
-				let hash = {
+				// Fetch block hash with retry
+				let hash = retry_async(|| async {
 					let _permit = sem.acquire().await.unwrap();
-					rpc.chain_get_block_hash(Some(block_num.into())).await
-				};
+					match rpc.chain_get_block_hash(Some(block_num.into())).await {
+						Ok(Some(h)) => Ok(h),
+						Ok(None) => Err(anyhow::anyhow!("No hash for block #{}", block_num)),
+						Err(e) => Err(e.into()),
+					}
+				})
+				.await;
+
 				let hash = match hash {
-					Ok(Some(h)) => h,
-					_ => return (block_num, None),
+					Ok(h) => h,
+					Err(_) => {
+						failures.fetch_add(1, Ordering::Relaxed);
+						return (block_num, None);
+					},
 				};
 
-				let session = {
+				// Fetch session index with retry
+				let session_index = retry_async(|| async {
 					let _permit = sem.acquire().await.unwrap();
 					let query = subxt::dynamic::storage("Session", "CurrentIndex", ());
-					api.storage().at(hash).fetch(&query).await.ok().flatten()
-				};
-				let session_index = session
-					.and_then(|v| v.to_value().ok())
-					.and_then(|v| extract_u32(&v))
-					.unwrap_or(0);
+					let result = api
+						.storage()
+						.at(hash)
+						.fetch(&query)
+						.await
+						.map_err(|e| anyhow::anyhow!(e))?
+						.ok_or_else(|| anyhow::anyhow!("Session::CurrentIndex not found"))?;
+					let val = result.to_value().map_err(|e| anyhow::anyhow!(e))?;
+					extract_u32(&val)
+						.ok_or_else(|| anyhow::anyhow!("Failed to decode session index"))
+				})
+				.await
+				.unwrap_or_else(|_| {
+					failures.fetch_add(1, Ordering::Relaxed);
+					0
+				});
 
-				let events = {
+				// Fetch events with retry
+				let events_result = retry_async(|| async {
 					let _permit = sem.acquire().await.unwrap();
-					api.events().at(hash).await
-				};
+					api.events()
+						.at(hash)
+						.await
+						.map_err(|e| anyhow::anyhow!(e))
+				})
+				.await;
 
 				let mut backed = Vec::new();
 				let mut included = Vec::new();
 
-				if let Ok(events) = events {
-					for event in events.iter() {
-						let Ok(event) = event else { continue };
-						if event.pallet_name() != "ParaInclusion" {
-							continue;
-						}
-						let is_backed = event.variant_name() == "CandidateBacked";
-						let is_included = event.variant_name() == "CandidateIncluded";
-						if !is_backed && !is_included {
-							continue;
-						}
-						if let Ok(fields) = event.field_values() {
-							if let Some(ce) =
-								extract_para_candidate_event(&fields, para_id)
-							{
-								if is_backed {
-									backed.push(ce);
-								} else {
-									included.push(ce);
+				match events_result {
+					Ok(events) => {
+						for event in events.iter() {
+							let Ok(event) = event else { continue };
+							if event.pallet_name() != "ParaInclusion" {
+								continue;
+							}
+							let is_backed = event.variant_name() == "CandidateBacked";
+							let is_included = event.variant_name() == "CandidateIncluded";
+							if !is_backed && !is_included {
+								continue;
+							}
+							if let Ok(fields) = event.field_values() {
+								if let Some(ce) =
+									extract_para_candidate_event(&fields, para_id)
+								{
+									if is_backed {
+										backed.push(ce);
+									} else {
+										included.push(ce);
+									}
 								}
 							}
 						}
-					}
+					},
+					Err(_) => {
+						failures.fetch_add(1, Ordering::Relaxed);
+					},
 				}
 
 				let info = OnChainBlockInfo {
@@ -208,6 +245,15 @@ impl ChainClient {
 			if let Some(info) = info {
 				results.insert(block_num, info);
 			}
+		}
+
+		let total_failures = rpc_failures.load(Ordering::Relaxed);
+		if total_failures > 0 {
+			tracing::warn!(
+				failures = total_failures,
+				total_queries = blocks.len(),
+				"Some RPC queries failed after retries — results may be incomplete"
+			);
 		}
 
 		Ok(results)
@@ -406,4 +452,26 @@ fn extract_h256(val: &ScaleValue) -> Option<[u8; 32]> {
 		},
 		_ => None,
 	}
+}
+
+/// Retry an async operation with exponential backoff.
+async fn retry_async<F, Fut, T>(mut f: F) -> Result<T>
+where
+	F: FnMut() -> Fut,
+	Fut: std::future::Future<Output = Result<T>>,
+{
+	let mut last_err = None;
+	for attempt in 0..=MAX_RETRIES {
+		match f().await {
+			Ok(val) => return Ok(val),
+			Err(e) => {
+				last_err = Some(e);
+				if attempt < MAX_RETRIES {
+					let delay = RETRY_BASE_MS * (1 << attempt);
+					tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+				}
+			},
+		}
+	}
+	Err(last_err.unwrap())
 }

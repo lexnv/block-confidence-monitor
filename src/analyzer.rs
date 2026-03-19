@@ -654,7 +654,195 @@ pub fn analyze_rebuilds(
 		"Rebuild attribution results"
 	);
 
-	MultiCollatorAnalysis { per_collator, rebuilds }
+	// Slot boundary analysis
+	let slot_boundary_analysis = Some(analyze_slot_boundaries(multi));
+
+	MultiCollatorAnalysis { per_collator, rebuilds, slot_boundary_analysis }
+}
+
+/// Analyze slot boundary transitions across all collators.
+///
+/// For each consecutive pair of slots (from different collators), measure:
+/// 1. Propagation delay: time between outgoing seal and incoming build start
+/// 2. Overlap size: how many heights both collators built at
+/// 3. Relay parent gap: whether the RP jumped by more than 1 (possible relay fork)
+pub fn analyze_slot_boundaries(multi: &MultiCollatorLogs) -> SlotBoundaryAnalysis {
+	// Collect all (slot, collator_name, rp, first_build_time, last_seal_time, heights_built)
+	// from each collator's building bursts.
+	struct SlotBurst {
+		slot: u64,
+		collator: String,
+		rp: u32,
+		first_build_time: chrono::DateTime<chrono::Utc>,
+		last_seal_time: chrono::DateTime<chrono::Utc>,
+		heights: BTreeSet<u32>,
+	}
+
+	let mut bursts: Vec<SlotBurst> = Vec::new();
+
+	for (name, log) in &multi.collators {
+		// Group building attempts by slot
+		let mut by_slot: BTreeMap<u64, Vec<&BuildAttempt>> = BTreeMap::new();
+		for ba in &log.build_attempts {
+			if ba.building {
+				by_slot.entry(ba.slot).or_default().push(ba);
+			}
+		}
+
+		// Group pre-sealed by slot (match via time proximity to building attempts)
+		let mut sealed_by_slot: BTreeMap<u64, Vec<&PreSealedBlock>> = BTreeMap::new();
+		for ps in &log.pre_sealed {
+			// Find which slot this pre-sealed belongs to
+			let mut best_slot = None;
+			let mut best_dt = i64::MAX;
+			for (&slot, bas) in &by_slot {
+				for ba in bas {
+					let dt = (ps.timestamp - ba.timestamp).num_milliseconds();
+					if dt >= 0 && dt < 5000 && dt < best_dt {
+						best_dt = dt;
+						best_slot = Some(slot);
+					}
+				}
+			}
+			if let Some(slot) = best_slot {
+				sealed_by_slot.entry(slot).or_default().push(ps);
+			}
+		}
+
+		for (&slot, bas) in &by_slot {
+			if bas.is_empty() {
+				continue;
+			}
+			let rp = bas[0].relay_parent_num;
+			let first_build_time = bas.iter().map(|ba| ba.timestamp).min().unwrap();
+
+			// Get heights built
+			let heights: BTreeSet<u32> = bas
+				.iter()
+				.map(|ba| ba.included_num + ba.unincluded_segment_len + 1)
+				.collect();
+
+			// Get last seal time
+			let last_seal_time = sealed_by_slot
+				.get(&slot)
+				.and_then(|seals| seals.iter().map(|ps| ps.timestamp).max())
+				.unwrap_or(first_build_time);
+
+			bursts.push(SlotBurst {
+				slot,
+				collator: name.clone(),
+				rp,
+				first_build_time,
+				last_seal_time,
+				heights,
+			});
+		}
+	}
+
+	// Sort by slot
+	bursts.sort_by_key(|b| b.slot);
+
+	// Deduplicate: keep one burst per slot (different collators claim different slots)
+	// If two collators claim the same slot, that's unexpected — keep the first.
+	let mut seen_slots: BTreeSet<u64> = BTreeSet::new();
+	bursts.retain(|b| seen_slots.insert(b.slot));
+
+	// Analyze consecutive pairs
+	let mut boundaries = Vec::new();
+	for window in bursts.windows(2) {
+		let outgoing = &window[0];
+		let incoming = &window[1];
+
+		// Only analyze transitions between different collators
+		if outgoing.collator == incoming.collator {
+			continue;
+		}
+
+		let propagation_gap_ms =
+			(incoming.first_build_time - outgoing.last_seal_time).num_milliseconds();
+
+		let overlap_count = outgoing
+			.heights
+			.intersection(&incoming.heights)
+			.count() as u32;
+
+		boundaries.push(SlotBoundaryDetail {
+			outgoing_slot: outgoing.slot,
+			incoming_slot: incoming.slot,
+			outgoing_collator: outgoing.collator.clone(),
+			incoming_collator: incoming.collator.clone(),
+			outgoing_seal_time: outgoing.last_seal_time,
+			incoming_build_time: incoming.first_build_time,
+			propagation_gap_ms,
+			overlap_count,
+			outgoing_rp: outgoing.rp,
+			incoming_rp: incoming.rp,
+		});
+	}
+
+	// Compute aggregates
+	let boundaries_with_overlap = boundaries.iter().filter(|b| b.overlap_count > 0).count();
+	let boundaries_without_overlap = boundaries.len() - boundaries_with_overlap;
+
+	let mut gaps: Vec<i64> = boundaries.iter().map(|b| b.propagation_gap_ms).collect();
+	gaps.sort();
+
+	let avg_propagation_gap_ms = if gaps.is_empty() {
+		0.0
+	} else {
+		gaps.iter().sum::<i64>() as f64 / gaps.len() as f64
+	};
+
+	let median_propagation_gap_ms = if gaps.is_empty() {
+		0
+	} else {
+		gaps[gaps.len() / 2]
+	};
+
+	let min_propagation_gap_ms = gaps.first().copied().unwrap_or(0);
+	let max_propagation_gap_ms = gaps.last().copied().unwrap_or(0);
+
+	let overlapping: Vec<&SlotBoundaryDetail> =
+		boundaries.iter().filter(|b| b.overlap_count > 0).collect();
+	let avg_overlap_count = if overlapping.is_empty() {
+		0.0
+	} else {
+		overlapping.iter().map(|b| b.overlap_count as f64).sum::<f64>() / overlapping.len() as f64
+	};
+	let max_overlap_count = boundaries.iter().map(|b| b.overlap_count).max().unwrap_or(0);
+
+	// Detect relay parent gaps > 1 between consecutive slots
+	let relay_parent_gaps = boundaries
+		.iter()
+		.filter(|b| {
+			let rp_diff = (b.incoming_rp as i64 - b.outgoing_rp as i64).unsigned_abs();
+			rp_diff > 1
+		})
+		.count();
+
+	tracing::info!(
+		total_boundaries = boundaries.len(),
+		with_overlap = boundaries_with_overlap,
+		without_overlap = boundaries_without_overlap,
+		avg_gap_ms = format!("{:.0}", avg_propagation_gap_ms),
+		median_gap_ms = median_propagation_gap_ms,
+		min_gap_ms = min_propagation_gap_ms,
+		relay_parent_gaps,
+		"Slot boundary analysis complete"
+	);
+
+	SlotBoundaryAnalysis {
+		boundaries,
+		boundaries_with_overlap,
+		boundaries_without_overlap,
+		avg_propagation_gap_ms,
+		median_propagation_gap_ms,
+		min_propagation_gap_ms,
+		max_propagation_gap_ms,
+		avg_overlap_count,
+		max_overlap_count,
+		relay_parent_gaps,
+	}
 }
 
 /// Classify the root cause of a rebuild.

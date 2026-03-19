@@ -404,6 +404,11 @@ fn write_multi_collator_section(
 	}
 	let _ = writeln!(out);
 
+	// Slot boundary analysis
+	if let Some(ref sba) = multi.slot_boundary_analysis {
+		write_slot_boundary_section(out, sba, config);
+	}
+
 	// Sample rebuilds
 	let sample_count = multi.rebuilds.len().min(config.max_samples);
 	if sample_count > 0 {
@@ -460,6 +465,107 @@ fn write_multi_collator_section(
 			}
 			let _ = writeln!(out);
 		}
+	}
+}
+
+fn write_slot_boundary_section(
+	out: &mut String,
+	sba: &SlotBoundaryAnalysis,
+	config: &ReportConfig,
+) {
+	if sba.boundaries.is_empty() {
+		return;
+	}
+
+	let _ = writeln!(out, "### Slot Boundary Propagation Analysis\n");
+	let _ = writeln!(
+		out,
+		"Measures the time gap between the outgoing collator sealing its last block \
+		and the incoming collator starting to build. Negative = overlap (incoming started before \
+		outgoing's block was propagated).\n"
+	);
+
+	let _ = writeln!(out, "| Metric | Value |");
+	let _ = writeln!(out, "|---|---|");
+	let _ = writeln!(out, "| Total slot boundaries | {} |", sba.boundaries.len());
+	let _ = writeln!(
+		out,
+		"| Boundaries with overlap | **{}** ({:.0}%) |",
+		sba.boundaries_with_overlap,
+		sba.boundaries_with_overlap as f64 / sba.boundaries.len() as f64 * 100.0
+	);
+	let _ = writeln!(
+		out,
+		"| Boundaries without overlap | {} ({:.0}%) |",
+		sba.boundaries_without_overlap,
+		sba.boundaries_without_overlap as f64 / sba.boundaries.len() as f64 * 100.0
+	);
+	let _ = writeln!(
+		out,
+		"| Propagation gap (avg) | **{:.0}ms** |",
+		sba.avg_propagation_gap_ms
+	);
+	let _ = writeln!(
+		out,
+		"| Propagation gap (median) | **{}ms** |",
+		sba.median_propagation_gap_ms
+	);
+	let _ = writeln!(
+		out,
+		"| Propagation gap (min / max) | {}ms / {}ms |",
+		sba.min_propagation_gap_ms, sba.max_propagation_gap_ms
+	);
+	if sba.boundaries_with_overlap > 0 {
+		let _ = writeln!(
+			out,
+			"| Avg overlap per boundary (when overlapping) | **{:.1} blocks** |",
+			sba.avg_overlap_count
+		);
+		let _ = writeln!(
+			out,
+			"| Max overlap at a single boundary | **{} blocks** |",
+			sba.max_overlap_count
+		);
+	}
+	if sba.relay_parent_gaps > 0 {
+		let _ = writeln!(
+			out,
+			"| Relay parent gaps > 1 block | **{}** ({:.0}%) — possible relay chain forks |",
+			sba.relay_parent_gaps,
+			sba.relay_parent_gaps as f64 / sba.boundaries.len() as f64 * 100.0
+		);
+	}
+	let _ = writeln!(out);
+
+	// Show worst-overlap boundaries as samples
+	let mut worst: Vec<&SlotBoundaryDetail> = sba.boundaries.iter().collect();
+	worst.sort_by(|a, b| {
+		b.overlap_count
+			.cmp(&a.overlap_count)
+			.then(a.propagation_gap_ms.cmp(&b.propagation_gap_ms))
+	});
+
+	let sample_count = worst.len().min(config.max_samples);
+	let worst_with_overlap: Vec<&&SlotBoundaryDetail> =
+		worst.iter().filter(|b| b.overlap_count > 0).take(sample_count).collect();
+
+	if !worst_with_overlap.is_empty() {
+		let _ = writeln!(out, "#### Worst overlap boundaries\n");
+		for b in &worst_with_overlap {
+			let _ = writeln!(
+				out,
+				"- Slot {} ({}) → {} ({}): gap **{}ms**, overlap **{} blocks**, RP #{} → #{}",
+				b.outgoing_slot,
+				b.outgoing_collator,
+				b.incoming_slot,
+				b.incoming_collator,
+				b.propagation_gap_ms,
+				b.overlap_count,
+				b.outgoing_rp,
+				b.incoming_rp,
+			);
+		}
+		let _ = writeln!(out);
 	}
 }
 
