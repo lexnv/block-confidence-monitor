@@ -1,0 +1,487 @@
+use crate::types::*;
+use std::fmt::Write;
+
+pub struct ReportConfig {
+	pub chain_name: String,
+	pub max_samples: usize,
+	#[allow(dead_code)]
+	pub viability_window: u32,
+	pub para_id: u32,
+	#[allow(dead_code)]
+	pub rpc_url: String,
+	pub n_collators: usize,
+}
+
+pub fn generate_report(
+	analysis: &Analysis,
+	config: &ReportConfig,
+	log: &ParsedLog,
+) -> String {
+	let mut out = String::with_capacity(8192);
+
+	write_confidence(&mut out, log);
+	write_summary(&mut out, analysis, config);
+	write_session_boundary_section(&mut out, analysis, config);
+	write_non_session_section(&mut out, analysis, config);
+	write_sample_data_points(&mut out, analysis, config);
+
+	out
+}
+
+pub fn generate_multi_collator_report(
+	analysis: &Analysis,
+	config: &ReportConfig,
+	multi_analysis: &MultiCollatorAnalysis,
+	primary_log: &ParsedLog,
+) -> String {
+	let mut out = String::with_capacity(16384);
+
+	// Use the primary (first) collator's confidence for the main table
+	write_confidence(&mut out, primary_log);
+	write_multi_collator_section(&mut out, multi_analysis, config);
+	write_summary(&mut out, analysis, config);
+	write_session_boundary_section(&mut out, analysis, config);
+	write_non_session_section(&mut out, analysis, config);
+	write_sample_data_points(&mut out, analysis, config);
+
+	out
+}
+
+fn write_confidence(out: &mut String, log: &ParsedLog) {
+	let best = log.best_imports();
+	let rebuilt = log.non_best_imports();
+	let total = best + rebuilt;
+	let confidence = log.block_confidence();
+
+	let _ = writeln!(out, "## Block Confidence\n");
+	let _ = writeln!(out, "| Metric | Value |");
+	let _ = writeln!(out, "|---|---|");
+	let _ = writeln!(out, "| \u{1f3c6} Blocks built (best) | **{}** |", best);
+	let _ = writeln!(out, "| \u{1f195} Blocks rebuilt (non-best) | **{}** |", rebuilt);
+	let _ = writeln!(out, "| Total parachain imports | {} |", total);
+	let _ = writeln!(out, "| **Block Confidence** | **{:.2}%** |", confidence);
+	if best > 0 {
+		let rebuild_rate = rebuilt as f64 / best as f64 * 100.0;
+		let _ = writeln!(out, "| Rebuild rate | {:.2}% |", rebuild_rate);
+	}
+	let _ = writeln!(out);
+}
+
+fn write_summary(out: &mut String, analysis: &Analysis, config: &ReportConfig) {
+	let (start, end) = analysis.time_window;
+	let duration = end - start;
+	let duration_str = format_duration(duration);
+
+	let _ = writeln!(out, "## Summary of top issues identified over a {} window\n", duration_str);
+	let _ = writeln!(
+		out,
+		"This data was collected from collator logs for para_id {}.",
+		config.para_id
+	);
+	let _ = writeln!(out);
+	let _ = writeln!(
+		out,
+		"Setup: {} collator(s), {} core(s).\n",
+		config.n_collators, analysis.n_cores
+	);
+	let _ = writeln!(
+		out,
+		"- Total blocks built locally: **{}**",
+		analysis.total_built
+	);
+	let _ = writeln!(
+		out,
+		"- Total blocks included on-chain: **{}**",
+		analysis.total_included
+	);
+	let _ = writeln!(
+		out,
+		"- Total blocks dropped: **{}**",
+		analysis.total_dropped
+	);
+	if !analysis.edge_of_window_drops.is_empty() {
+		let _ = writeln!(
+			out,
+			"- Edge-of-window blocks excluded: **{}** (these blocks were built near the \
+			start/end of the log window and might have been included in relay chain blocks \
+			outside the observed range)",
+			analysis.edge_of_window_drops.len()
+		);
+	}
+	let _ = writeln!(out);
+}
+
+fn write_session_boundary_section(out: &mut String, analysis: &Analysis, config: &ReportConfig) {
+	let session_drops = analysis.session_boundary_drops.len();
+	let (avg, min, max) = analysis.session_drop_stats();
+
+	let session_duration = if analysis.session_boundaries.len() >= 2 {
+		let first = analysis.session_boundaries.first().unwrap().0;
+		let last = analysis.session_boundaries.last().unwrap().0;
+		let blocks = last - first;
+		let sessions = analysis.session_boundaries.len() as u32 - 1;
+		if sessions > 0 {
+			let blocks_per_session = blocks / sessions;
+			format!("~{} blocks (~{} minutes)", blocks_per_session, blocks_per_session * 6 / 60)
+		} else {
+			"unknown".to_string()
+		}
+	} else {
+		"unknown".to_string()
+	};
+
+	let _ = writeln!(
+		out,
+		"### Session boundaries on {} (every {})\n",
+		config.chain_name, session_duration
+	);
+
+	if session_drops == 0 && analysis.session_boundaries.is_empty() {
+		let _ = writeln!(
+			out,
+			"No session boundaries observed in the log window. Cannot assess session boundary drops.\n"
+		);
+	} else if session_drops == 0 {
+		let _ = writeln!(
+			out,
+			"No blocks dropped at session boundaries ({} session change(s) observed).\n",
+			analysis.session_boundaries.len()
+		);
+	} else {
+		let _ = writeln!(
+			out,
+			"Analysis shows a total of **{} blocks** being dropped at session boundaries.\n",
+			session_drops
+		);
+		let _ = writeln!(out, "- Average (per session change): **{:.1} blocks**", avg);
+		let _ = writeln!(out, "- Min: **{} block(s)**", min);
+		let _ = writeln!(out, "- Max: **{} blocks**", max);
+		let _ = writeln!(out);
+	}
+}
+
+fn write_non_session_section(out: &mut String, analysis: &Analysis, _config: &ReportConfig) {
+	let rp_expired = analysis.relay_parent_expired_drops.len();
+	let wrong_fork = analysis.wrong_fork_drops.len();
+	let unknown = analysis.unknown_drops.len();
+	let total = rp_expired + wrong_fork + unknown;
+
+	let _ = writeln!(out, "### Non-session boundary\n");
+
+	if total == 0 {
+		let _ = writeln!(out, "No blocks dropped outside of session boundaries.\n");
+		return;
+	}
+
+	let _ = writeln!(
+		out,
+		"Analysis shows a total of **{} blocks** being dropped.\n",
+		total
+	);
+	let _ = writeln!(out, "Approximate breakdown:");
+
+	if total > 0 {
+		let rp_pct = rp_expired as f64 / total as f64 * 100.0;
+		let fork_pct = wrong_fork as f64 / total as f64 * 100.0;
+		let _ = writeln!(
+			out,
+			"- Relay parent expired (**~{:.0}%**). Why?",
+			rp_pct
+		);
+		let _ = writeln!(
+			out,
+			"\t- Low performance validators produce empty relay blocks or blocks with very few backed candidates"
+		);
+		let _ = writeln!(
+			out,
+			"- Built on wrong fork (~**{:.0}%**)",
+			fork_pct
+		);
+	}
+
+	if unknown > 0 {
+		let _ = writeln!(out, "- Unknown reason: **{}**", unknown);
+	}
+
+	let _ = writeln!(out);
+}
+
+fn write_sample_data_points(out: &mut String, analysis: &Analysis, config: &ReportConfig) {
+	let _ = writeln!(out, "## Sample data points");
+
+	// Session boundary drops
+	if !analysis.session_boundary_drops.is_empty() {
+		let _ = writeln!(out, "### Session boundary drops");
+		let samples = &analysis.session_boundary_drops[..analysis
+			.session_boundary_drops
+			.len()
+			.min(config.max_samples)];
+		for drop in samples {
+			write_drop_sample(out, drop, config);
+		}
+	}
+
+	// Relay parent expired drops
+	if !analysis.relay_parent_expired_drops.is_empty() {
+		let _ = writeln!(out, "### Relay parent expired drops");
+		let samples = &analysis.relay_parent_expired_drops[..analysis
+			.relay_parent_expired_drops
+			.len()
+			.min(config.max_samples)];
+		for drop in samples {
+			write_drop_sample(out, drop, config);
+		}
+	}
+
+	// Wrong fork drops
+	if !analysis.wrong_fork_drops.is_empty() {
+		let _ = writeln!(out, "### Blocks built on wrong fork");
+		let samples = &analysis.wrong_fork_drops
+			[..analysis.wrong_fork_drops.len().min(config.max_samples)];
+		for drop in samples {
+			write_drop_sample(out, drop, config);
+		}
+	}
+}
+
+fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfig) {
+	let _ = writeln!(
+		out,
+		"#### \u{1f3c6} Imported #{} ({} → {})",
+		drop.para_block_number,
+		drop.parent_hash.short(),
+		drop.para_block_hash.short()
+	);
+
+	// Root cause
+	let _ = writeln!(out, "- **Root cause**: {}", drop.reason);
+
+	// Timing
+	let _ = writeln!(out, "- Built at: {}", drop.built_at.format("%H:%M:%S%.3f"));
+	if let Some(latency) = drop.collation_fetch_latency_ms {
+		let _ = writeln!(out, "- Collation fetch latency: **{}ms**", latency);
+	}
+
+	// Relay parent info
+	let _ = writeln!(
+		out,
+		"- Relay parent: #{} ({})",
+		drop.relay_parent_num, drop.relay_parent_hash.short()
+	);
+
+	// Check if RP is on wrong fork
+	match &drop.reason {
+		DropReason::WrongFork { .. } => {
+			let _ = writeln!(out, "- RP **on wrong fork**: relay parent was pruned from canonical chain");
+		},
+		_ => {
+			let _ = writeln!(out, "- RP is not on wrong fork");
+		},
+	}
+
+	// Relay chain block sequence
+	if !drop.nearby_relay_blocks.is_empty() {
+		let _ = writeln!(out, "- Relay chain block sequence:");
+		for info in &drop.nearby_relay_blocks {
+			let hash_short = format!("0x{}…{}", &hex::encode(&info.block_hash[..2]), &hex::encode(&info.block_hash[30..32]));
+
+			let backed_info = if info.backed_para_candidates.is_empty() {
+				"no backed candidates for our para".to_string()
+			} else {
+				format!(
+					"backs {} candidate(s) for para {}",
+					info.backed_para_candidates.len(),
+					config.para_id
+				)
+			};
+
+			let included_info = if info.included_para_candidates.is_empty() {
+				String::new()
+			} else {
+				format!(
+					", includes {} candidate(s)",
+					info.included_para_candidates.len()
+				)
+			};
+
+			let session_note = if drop.nearby_relay_blocks.len() > 1 {
+				// Check if session changed from previous block
+				let prev = drop
+					.nearby_relay_blocks
+					.iter()
+					.find(|b| b.block_number == info.block_number.saturating_sub(1));
+				if let Some(prev) = prev {
+					if prev.session_index != info.session_index {
+						format!(", **NEW SESSION** ({} → {})", prev.session_index, info.session_index)
+					} else {
+						String::new()
+					}
+				} else {
+					String::new()
+				}
+			} else {
+				String::new()
+			};
+
+			let _ = writeln!(
+				out,
+				"  - #{} ({}): {}{}{}",
+				info.block_number,
+				hash_short,
+				backed_info,
+				included_info,
+				session_note
+			);
+		}
+	}
+
+	let _ = writeln!(out);
+}
+
+fn write_multi_collator_section(
+	out: &mut String,
+	multi: &MultiCollatorAnalysis,
+	config: &ReportConfig,
+) {
+	let _ = writeln!(out, "## Multi-Collator Rebuild Analysis\n");
+
+	// Per-collator authorship table
+	let _ = writeln!(
+		out,
+		"| Collator | Blocks Built | \u{1f3c6} Won (final best) | Lost (replaced) | Win Rate |"
+	);
+	let _ = writeln!(out, "|---|---|---|---|---|");
+	for cs in &multi.per_collator {
+		let _ = writeln!(
+			out,
+			"| {} | {} | {} | {} | {:.2}% |",
+			cs.name, cs.blocks_built, cs.blocks_won, cs.blocks_lost, cs.win_rate
+		);
+	}
+	let _ = writeln!(out);
+
+	if multi.rebuilds.is_empty() {
+		let _ = writeln!(out, "No rebuild events detected across collators.\n");
+		return;
+	}
+
+	// Classify rebuilds using the pre-computed cause
+	let total = multi.rebuilds.len();
+	let mut slot_boundary = 0usize;
+	let mut newer_rp = 0usize;
+	let mut unknown = 0usize;
+
+	for r in &multi.rebuilds {
+		match &r.cause {
+			RebuildCause::SlotBoundaryOverlap { .. } => slot_boundary += 1,
+			RebuildCause::NewerRelayParent { .. } => newer_rp += 1,
+			RebuildCause::Unknown => unknown += 1,
+		}
+	}
+
+	let pct = |n: usize| n as f64 / total as f64 * 100.0;
+	let _ = writeln!(out, "### Rebuild Breakdown ({} total)\n", total);
+	if slot_boundary > 0 {
+		let _ = writeln!(
+			out,
+			"- Slot boundary overlap: **{}** ({:.0}%) — incoming collator started before outgoing collator's block propagated",
+			slot_boundary, pct(slot_boundary)
+		);
+	}
+	if newer_rp > 0 {
+		let _ = writeln!(
+			out,
+			"- Rebuilt on newer relay parent: **{}** ({:.0}%) — collator rebuilt at same height on a newer RP in a later slot",
+			newer_rp, pct(newer_rp)
+		);
+	}
+	if unknown > 0 {
+		let _ = writeln!(
+			out,
+			"- Unknown: **{}** ({:.0}%)",
+			unknown, pct(unknown)
+		);
+	}
+	let _ = writeln!(out);
+
+	// Sample rebuilds
+	let sample_count = multi.rebuilds.len().min(config.max_samples);
+	if sample_count > 0 {
+		let _ = writeln!(out, "### Sample Rebuilds\n");
+		for r in &multi.rebuilds[..sample_count] {
+			let _ = writeln!(out, "#### Block #{} \u{2014} rebuilt on {}", r.block_number, r.observer);
+
+			let slot_info = |slot: Option<u64>| {
+				slot.map(|s| format!(" slot {}", s)).unwrap_or_default()
+			};
+
+			let _ = writeln!(
+				out,
+				"- Original best: {} (built by {} at {}{}{})",
+				r.block_hash_best.short(),
+				r.best_collator.as_deref().unwrap_or("unknown"),
+				r.best_timestamp.format("%H:%M:%S%.3f"),
+				r.best_relay_parent
+					.map(|rp| format!(" on RP #{}", rp))
+					.unwrap_or_default(),
+				slot_info(r.best_slot),
+			);
+			let _ = writeln!(
+				out,
+				"- Replacement: {} (built by {} at {}{}{})",
+				r.block_hash_rebuilt.short(),
+				r.rebuilt_collator.as_deref().unwrap_or("unknown"),
+				r.rebuilt_timestamp.format("%H:%M:%S%.3f"),
+				r.rebuilt_relay_parent
+					.map(|rp| format!(" on RP #{}", rp))
+					.unwrap_or_default(),
+				slot_info(r.rebuilt_slot),
+			);
+
+			// Root cause from classified cause
+			match &r.cause {
+				RebuildCause::SlotBoundaryOverlap { outgoing_slot, incoming_slot } => {
+					let _ = writeln!(
+						out,
+						"- Root cause: slot boundary overlap (slot {} → {})",
+						outgoing_slot, incoming_slot
+					);
+				},
+				RebuildCause::NewerRelayParent { old_rp, new_rp } => {
+					let _ = writeln!(
+						out,
+						"- Root cause: rebuilt on newer relay parent (RP #{} → #{})",
+						old_rp, new_rp
+					);
+				},
+				RebuildCause::Unknown => {
+					let _ = writeln!(out, "- Root cause: unknown");
+				},
+			}
+			let _ = writeln!(out);
+		}
+	}
+}
+
+fn format_duration(duration: chrono::Duration) -> String {
+	let total_secs = duration.num_seconds();
+	if total_secs < 3600 {
+		format!("{} minute", total_secs / 60)
+	} else if total_secs < 86400 {
+		let hours = total_secs / 3600;
+		let mins = (total_secs % 3600) / 60;
+		if mins > 0 {
+			format!("{} hour {} minute", hours, mins)
+		} else {
+			format!("{} hour", hours)
+		}
+	} else {
+		let days = total_secs / 86400;
+		let hours = (total_secs % 86400) / 3600;
+		if hours > 0 {
+			format!("{} day {} hour", days, hours)
+		} else {
+			format!("{} day", days)
+		}
+	}
+}

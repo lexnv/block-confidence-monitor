@@ -1,0 +1,17 @@
+[package]
+name = "block-confidence-monitor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+subxt = "0.44"
+codec = { package = "parity-scale-codec", version = "3", features = ["derive"] }
+chrono = "0.4"
+regex = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+futures = "0.3"
