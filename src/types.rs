@@ -445,6 +445,8 @@ pub struct RebuildEvent {
 	pub cause: RebuildCause,
 	/// Which block was actually included on-chain at this height.
 	pub on_chain_winner: OnChainWinner,
+	/// Relay chain block sequence between the best and rebuilt relay parents.
+	pub relay_block_sequence: Vec<OnChainBlockInfo>,
 }
 
 /// Which block at a given height was included on-chain.

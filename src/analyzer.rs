@@ -438,12 +438,14 @@ pub fn analyze_rebuilds(
 		}
 	}
 
-	// Build a lookup: (collator_name, block_number) → (relay_parent_num, slot)
+	// Build a lookup: (collator_name, block_hash_key) → (relay_parent_num, slot)
 	// Match BuildAttempt to PreSealed by block number: for each PreSealed at height N,
 	// find the BuildAttempt whose resulting block is at height N.
 	// BuildAttempt at included_num + unincluded_segment_len + 1 = resulting block height.
 	// Fall back to closest-before-in-time match at the same slot.
-	let mut rp_and_slot_for_sealed: HashMap<(String, u32), (u32, u64)> = HashMap::new();
+	// Key includes block hash so that different blocks at the same height by the same
+	// collator (built on different relay parents) get separate entries.
+	let mut rp_and_slot_for_sealed: HashMap<(String, String), (u32, u64)> = HashMap::new();
 	for (name, log) in &multi.collators {
 		let building_attempts: Vec<&BuildAttempt> =
 			log.build_attempts.iter().filter(|ba| ba.building).collect();
@@ -484,8 +486,9 @@ pub fn analyze_rebuilds(
 			}
 
 			if let Some(ba) = best_ba {
+				let hash_key = full_hash_key(&ps.post_hash);
 				rp_and_slot_for_sealed
-					.insert((name.clone(), ps.block_number), (ba.relay_parent_num, ba.slot));
+					.insert((name.clone(), hash_key), (ba.relay_parent_num, ba.slot));
 			}
 		}
 	}
@@ -612,11 +615,14 @@ pub fn analyze_rebuilds(
 				let best_collator = sealed_by.get(&best_key).cloned();
 				let rebuilt_collator = sealed_by.get(&rebuilt_key).cloned();
 
+				let best_hash_resolved = resolve_hash_key(&best.block_hash, &merged_registry);
+				let rebuilt_hash_resolved = resolve_hash_key(&rebuilt.block_hash, &merged_registry);
+
 				let best_rp_slot = best_collator.as_ref().and_then(|c| {
-					rp_and_slot_for_sealed.get(&(c.clone(), *block_number)).copied()
+					rp_and_slot_for_sealed.get(&(c.clone(), best_hash_resolved.clone())).copied()
 				});
 				let rebuilt_rp_slot = rebuilt_collator.as_ref().and_then(|c| {
-					rp_and_slot_for_sealed.get(&(c.clone(), *block_number)).copied()
+					rp_and_slot_for_sealed.get(&(c.clone(), rebuilt_hash_resolved.clone())).copied()
 				});
 
 				let best_rp = best_rp_slot.map(|(rp, _)| rp);
@@ -650,6 +656,18 @@ pub fn analyze_rebuilds(
 						OnChainWinner::Unknown
 					};
 
+				// Collect relay block sequence between best and rebuilt relay parents
+				let relay_block_sequence = match (best_rp, rebuilt_rp) {
+					(Some(brp), Some(rrp)) => {
+						let start = brp.min(rrp);
+						let end = brp.max(rrp);
+						(start..=end)
+							.filter_map(|n| on_chain.get(&n).cloned())
+							.collect()
+					}
+					_ => Vec::new(),
+				};
+
 				rebuilds.push(RebuildEvent {
 					block_number: *block_number,
 					block_hash_best: best.block_hash.clone(),
@@ -665,6 +683,7 @@ pub fn analyze_rebuilds(
 					rebuilt_slot,
 					cause,
 					on_chain_winner,
+					relay_block_sequence,
 				});
 			}
 		}
@@ -894,19 +913,30 @@ fn classify_rebuild_cause(
 ) -> RebuildCause {
 	match (best_slot, rebuilt_slot) {
 		(Some(bs), Some(rs)) if bs != rs => {
-			// Different slots = different collators in round-robin.
-			// This is a slot boundary overlap: the incoming collator started
-			// building before the outgoing collator's block was propagated.
-			RebuildCause::SlotBoundaryOverlap {
-				outgoing_slot: bs.min(rs),
-				incoming_slot: bs.max(rs),
+			let same_collator = best_collator == rebuilt_collator
+				&& best_collator.is_some();
+
+			if same_collator {
+				// Same collator built both blocks on different slots/RPs.
+				// This is a relay parent advancement, not a slot boundary overlap.
+				match (best_rp, rebuilt_rp) {
+					(Some(brp), Some(rrp)) if brp != rrp => RebuildCause::NewerRelayParent {
+						old_rp: brp.min(rrp),
+						new_rp: brp.max(rrp),
+					},
+					_ => RebuildCause::Unknown,
+				}
+			} else {
+				// Different collators on different slots = slot boundary overlap.
+				RebuildCause::SlotBoundaryOverlap {
+					outgoing_slot: bs.min(rs),
+					incoming_slot: bs.max(rs),
+				}
 			}
 		},
 		(Some(_), Some(_)) => {
 			// Same slot but different blocks at the same height.
-			// This happens when the same collator rebuilds on a newer RP
-			// in its next turn (the slot numbers wrapped around).
-			// Actually check RPs to distinguish.
+			// Check RPs to distinguish.
 			match (best_rp, rebuilt_rp) {
 				(Some(brp), Some(rrp)) if brp != rrp => RebuildCause::NewerRelayParent {
 					old_rp: brp.min(rrp),

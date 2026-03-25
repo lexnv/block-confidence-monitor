@@ -521,6 +521,69 @@ fn write_multi_collator_section(
 					let _ = writeln!(out, "- On-chain: unknown (outside query range)");
 				},
 			}
+
+			// Relay chain block sequence between best and rebuilt relay parents
+			if !r.relay_block_sequence.is_empty() {
+				let _ = writeln!(out, "- Relay chain block sequence:");
+				for info in &r.relay_block_sequence {
+					let hash_hex = hex::encode(&info.block_hash);
+					let hash_short = format!("0x{}…{}", &hash_hex[..4], &hash_hex[hash_hex.len()-4..]);
+					let pjs_link = format!(
+						"https://polkadot.js.org/apps/?rpc=wss%3A%2F%2Frpc.polkadot.io#/explorer/query/0x{}",
+						hash_hex
+					);
+
+					// Decode backed candidate para block numbers
+					let backed_detail = if info.backed_para_candidates.is_empty() {
+						"no backed candidates for our para".to_string()
+					} else {
+						let nums: Vec<String> = info.backed_para_candidates.iter().map(|c| {
+							if let Some(ref hd) = c.para_head_data {
+								if let Some(n) = crate::chain_client::decode_para_block_number(hd) {
+									let block_hash = crate::chain_client::compute_block_hash_from_head_data(hd);
+									let bh_short = format!("0x{}…{}", &hex::encode(&block_hash[..2]), &hex::encode(&block_hash[30..32]));
+									format!("#{} ({})", n, bh_short)
+								} else {
+									"?".to_string()
+								}
+							} else {
+								"?".to_string()
+							}
+						}).collect();
+						format!("backs [{}]", nums.join(", "))
+					};
+
+					// Decode included candidate para block numbers
+					let included_detail = if info.included_para_candidates.is_empty() {
+						String::new()
+					} else {
+						let nums: Vec<String> = info.included_para_candidates.iter().map(|c| {
+							if let Some(ref hd) = c.para_head_data {
+								if let Some(n) = crate::chain_client::decode_para_block_number(hd) {
+									let block_hash = crate::chain_client::compute_block_hash_from_head_data(hd);
+									let bh_short = format!("0x{}…{}", &hex::encode(&block_hash[..2]), &hex::encode(&block_hash[30..32]));
+									format!("#{} ({})", n, bh_short)
+								} else {
+									"?".to_string()
+								}
+							} else {
+								"?".to_string()
+							}
+						}).collect();
+						format!(", includes [{}]", nums.join(", "))
+					};
+
+					let _ = writeln!(
+						out,
+						"  - [#{}]({}) ({}): {}{}",
+						info.block_number,
+						pjs_link,
+						hash_short,
+						backed_detail,
+						included_detail,
+					);
+				}
+			}
 			let _ = writeln!(out);
 		}
 	}
