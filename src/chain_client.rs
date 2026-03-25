@@ -355,6 +355,18 @@ pub fn decode_para_block_number(head_data: &[u8]) -> Option<u32> {
 	Some(number.0)
 }
 
+/// Compute the block hash from HeadData bytes (blake2b-256 of the header).
+pub fn compute_block_hash_from_head_data(head_data: &[u8]) -> [u8; 32] {
+	use blake2::digest::{consts::U32, Digest};
+	type Blake2b256 = blake2::Blake2b<U32>;
+	let mut hasher = Blake2b256::new();
+	hasher.update(head_data);
+	let result = hasher.finalize();
+	let mut hash = [0u8; 32];
+	hash.copy_from_slice(&result);
+	hash
+}
+
 /// Extract ParaCandidateEvent from a CandidateBacked/CandidateIncluded event's field values.
 /// Event structure: (CandidateReceipt, HeadData, CoreIndex, GroupIndex)
 /// CandidateReceipt: { descriptor: { para_id, relay_parent, ... }, commitments_hash }

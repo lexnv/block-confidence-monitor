@@ -374,6 +374,7 @@ name = "block-confidence-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake2",
  "chrono",
  "clap",
  "futures",

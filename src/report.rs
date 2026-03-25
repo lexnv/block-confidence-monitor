@@ -404,6 +404,53 @@ fn write_multi_collator_section(
 	}
 	let _ = writeln!(out);
 
+	// On-chain winner analysis
+	let mut winner_original = 0usize;
+	let mut winner_replacement = 0usize;
+	let mut winner_unknown = 0usize;
+	for r in &multi.rebuilds {
+		match &r.on_chain_winner {
+			OnChainWinner::OriginalBest => winner_original += 1,
+			OnChainWinner::Replacement => winner_replacement += 1,
+			OnChainWinner::Unknown => winner_unknown += 1,
+		}
+	}
+
+	let _ = writeln!(out, "### On-Chain Inclusion Outcome\n");
+	let _ = writeln!(
+		out,
+		"For each rebuild, which block was actually included on-chain?\n"
+	);
+	let _ = writeln!(out, "| Outcome | Count | % |");
+	let _ = writeln!(out, "|---|---|---|");
+	let _ = writeln!(
+		out,
+		"| Original best (\u{1f3c6}) won on-chain | {} | {:.0}% |",
+		winner_original, pct(winner_original)
+	);
+	let _ = writeln!(
+		out,
+		"| Replacement (\u{1f195}) won on-chain | {} | {:.0}% |",
+		winner_replacement, pct(winner_replacement)
+	);
+	if winner_unknown > 0 {
+		let _ = writeln!(
+			out,
+			"| Unknown (outside query range) | {} | {:.0}% |",
+			winner_unknown, pct(winner_unknown)
+		);
+	}
+	let _ = writeln!(out);
+
+	if winner_replacement > 0 {
+		let _ = writeln!(
+			out,
+			"**{}** rebuilds ({:.0}%) resulted in the replacement block winning on-chain — \
+			these are real chain replacements where the later collator's block was backed instead.\n",
+			winner_replacement, pct(winner_replacement)
+		);
+	}
+
 	// Slot boundary analysis
 	if let Some(ref sba) = multi.slot_boundary_analysis {
 		write_slot_boundary_section(out, sba, config);
@@ -461,6 +508,17 @@ fn write_multi_collator_section(
 				},
 				RebuildCause::Unknown => {
 					let _ = writeln!(out, "- Root cause: unknown");
+				},
+			}
+			match &r.on_chain_winner {
+				OnChainWinner::OriginalBest => {
+					let _ = writeln!(out, "- On-chain: **original best** was included");
+				},
+				OnChainWinner::Replacement => {
+					let _ = writeln!(out, "- On-chain: **replacement** was included");
+				},
+				OnChainWinner::Unknown => {
+					let _ = writeln!(out, "- On-chain: unknown (outside query range)");
 				},
 			}
 			let _ = writeln!(out);

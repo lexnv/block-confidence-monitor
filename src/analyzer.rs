@@ -412,7 +412,7 @@ fn detect_n_cores(log: &ParsedLog) -> u32 {
 /// Pre-sealed events to determine who built the replacement block.
 pub fn analyze_rebuilds(
 	multi: &MultiCollatorLogs,
-	_on_chain: &BTreeMap<u32, OnChainBlockInfo>,
+	on_chain: &BTreeMap<u32, OnChainBlockInfo>,
 ) -> MultiCollatorAnalysis {
 	// Build a merged hash registry from all collators so we can resolve
 	// truncated hashes (from para imports like "0x4a22…16ba") to full hashes
@@ -490,11 +490,27 @@ pub fn analyze_rebuilds(
 		}
 	}
 
+	// Build on-chain inclusion lookup: para_block_number → block_hash (computed from HeadData).
+	// This tells us which specific block was actually included on-chain at each height.
+	let mut on_chain_hash_at: HashMap<u32, [u8; 32]> = HashMap::new();
+	for info in on_chain.values() {
+		for candidate in &info.included_para_candidates {
+			if let Some(ref head_data) = candidate.para_head_data {
+				if let Some(num) = crate::chain_client::decode_para_block_number(head_data) {
+					let block_hash =
+						crate::chain_client::compute_block_hash_from_head_data(head_data);
+					on_chain_hash_at.insert(num, block_hash);
+				}
+			}
+		}
+	}
+
 	let sealed_by_count = sealed_by.len();
 	let rp_count = rp_and_slot_for_sealed.len();
 	tracing::info!(
 		sealed_by_entries = sealed_by_count,
 		rp_slot_entries = rp_count,
+		on_chain_hashes = on_chain_hash_at.len(),
 		merged_registry_truncated = merged_registry.by_truncated.len(),
 		merged_registry_full = merged_registry.by_full.len(),
 		"Multi-collator lookup tables built"
@@ -618,6 +634,22 @@ pub fn analyze_rebuilds(
 					rebuilt_slot,
 				);
 
+				// Determine which block was included on-chain
+				let on_chain_winner =
+					if let Some(included_hash) = on_chain_hash_at.get(block_number) {
+						let best_matches = best.block_hash.matches_full(included_hash);
+						let rebuilt_matches = rebuilt.block_hash.matches_full(included_hash);
+						if best_matches {
+							OnChainWinner::OriginalBest
+						} else if rebuilt_matches {
+							OnChainWinner::Replacement
+						} else {
+							OnChainWinner::Unknown
+						}
+					} else {
+						OnChainWinner::Unknown
+					};
+
 				rebuilds.push(RebuildEvent {
 					block_number: *block_number,
 					block_hash_best: best.block_hash.clone(),
@@ -632,6 +664,7 @@ pub fn analyze_rebuilds(
 					best_slot,
 					rebuilt_slot,
 					cause,
+					on_chain_winner,
 				});
 			}
 		}

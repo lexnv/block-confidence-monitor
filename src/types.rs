@@ -443,6 +443,19 @@ pub struct RebuildEvent {
 	pub rebuilt_slot: Option<u64>,
 	/// Classified root cause.
 	pub cause: RebuildCause,
+	/// Which block was actually included on-chain at this height.
+	pub on_chain_winner: OnChainWinner,
+}
+
+/// Which block at a given height was included on-chain.
+#[derive(Clone, Debug)]
+pub enum OnChainWinner {
+	/// The original 🏆 best block was the one included on-chain.
+	OriginalBest,
+	/// The 🆕 replacement block was the one included on-chain.
+	Replacement,
+	/// Neither block was found in the on-chain data (outside query range).
+	Unknown,
 }
 
 /// Classified root cause of a rebuild.
