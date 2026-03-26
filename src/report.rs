@@ -533,44 +533,51 @@ fn write_multi_collator_section(
 						hash_hex
 					);
 
-					// Decode backed candidate para block numbers
-					let backed_detail = if info.backed_para_candidates.is_empty() {
-						"no backed candidates for our para".to_string()
-					} else {
-						let nums: Vec<String> = info.backed_para_candidates.iter().map(|c| {
-							if let Some(ref hd) = c.para_head_data {
-								if let Some(n) = crate::chain_client::decode_para_block_number(hd) {
-									let block_hash = crate::chain_client::compute_block_hash_from_head_data(hd);
-									let bh_short = format!("0x{}…{}", &hex::encode(&block_hash[..2]), &hex::encode(&block_hash[30..32]));
-									format!("#{} ({})", n, bh_short)
-								} else {
-									"?".to_string()
-								}
-							} else {
-								"?".to_string()
-							}
-						}).collect();
-						format!("backs [{}]", nums.join(", "))
+					let n_backed = info.backed_para_candidates.len();
+					let n_included = info.included_para_candidates.len();
+
+					// Decode candidates into (block_number, hash_short) pairs
+					let decode_candidates = |candidates: &[ParaCandidateEvent]| -> Vec<(u32, String)> {
+						candidates.iter().filter_map(|c| {
+							let hd = c.para_head_data.as_ref()?;
+							let n = crate::chain_client::decode_para_block_number(hd)?;
+							let block_hash = crate::chain_client::compute_block_hash_from_head_data(hd);
+							let bh_short = format!("0x{}…{}", &hex::encode(&block_hash[..2]), &hex::encode(&block_hash[30..32]));
+							Some((n, bh_short))
+						}).collect()
 					};
 
-					// Decode included candidate para block numbers
-					let included_detail = if info.included_para_candidates.is_empty() {
+					let backed_decoded = decode_candidates(&info.backed_para_candidates);
+					let included_decoded = decode_candidates(&info.included_para_candidates);
+
+					// Format range summary: "10 (2758349-2758358)"
+					let range_summary = |decoded: &[(u32, String)], count: usize| -> String {
+						if count == 0 {
+							return String::new();
+						}
+						let nums: Vec<u32> = decoded.iter().map(|(n, _)| *n).collect();
+						if let (Some(&min), Some(&max)) = (nums.iter().min(), nums.iter().max()) {
+							if min == max {
+								format!("{} (#{})", count, min)
+							} else {
+								format!("{} ({}–{})", count, min, max)
+							}
+						} else {
+							format!("{}", count)
+						}
+					};
+
+					// Summary line
+					let backed_summary = if n_backed == 0 {
+						"no backed candidates for our para".to_string()
+					} else {
+						format!("backs {}", range_summary(&backed_decoded, n_backed))
+					};
+
+					let included_summary = if n_included == 0 {
 						String::new()
 					} else {
-						let nums: Vec<String> = info.included_para_candidates.iter().map(|c| {
-							if let Some(ref hd) = c.para_head_data {
-								if let Some(n) = crate::chain_client::decode_para_block_number(hd) {
-									let block_hash = crate::chain_client::compute_block_hash_from_head_data(hd);
-									let bh_short = format!("0x{}…{}", &hex::encode(&block_hash[..2]), &hex::encode(&block_hash[30..32]));
-									format!("#{} ({})", n, bh_short)
-								} else {
-									"?".to_string()
-								}
-							} else {
-								"?".to_string()
-							}
-						}).collect();
-						format!(", includes [{}]", nums.join(", "))
+						format!(", includes {}", range_summary(&included_decoded, n_included))
 					};
 
 					let _ = writeln!(
@@ -579,9 +586,17 @@ fn write_multi_collator_section(
 						info.block_number,
 						pjs_link,
 						hash_short,
-						backed_detail,
-						included_detail,
+						backed_summary,
+						included_summary,
 					);
+
+					// Detail lines: individual block number + hash
+					for (n, bh) in &backed_decoded {
+						let _ = writeln!(out, "    - backed #{} {}", n, bh);
+					}
+					for (n, bh) in &included_decoded {
+						let _ = writeln!(out, "    - included #{} {}", n, bh);
+					}
 				}
 			}
 			let _ = writeln!(out);
