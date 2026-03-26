@@ -203,8 +203,62 @@ fn write_non_session_section(out: &mut String, analysis: &Analysis, _config: &Re
 	if unknown > 0 {
 		let _ = writeln!(out, "- Unknown reason: **{}**", unknown);
 	}
-
 	let _ = writeln!(out);
+
+	// Collation expiry summary across all non-session drops
+	{
+		let all_drops: Vec<&DroppedBlock> = analysis.relay_parent_expired_drops.iter()
+			.chain(analysis.wrong_fork_drops.iter())
+			.chain(analysis.unknown_drops.iter())
+			.collect();
+		let mut state_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+		let mut drops_with_expiry = 0usize;
+		let mut total_expired = 0usize;
+		for d in &all_drops {
+			if !d.collation_expired.is_empty() {
+				drops_with_expiry += 1;
+				for ce in &d.collation_expired {
+					*state_counts.entry(ce.collation_state.clone()).or_insert(0) += 1;
+					total_expired += 1;
+				}
+			}
+		}
+		if total_expired > 0 {
+			let _ = writeln!(out, "#### Collation Expiry Analysis\n");
+			let _ = writeln!(
+				out,
+				"- Dropped blocks with collation expiry data: **{}** / {} ({:.0}%)",
+				drops_with_expiry, total,
+				drops_with_expiry as f64 / total as f64 * 100.0,
+			);
+			let _ = writeln!(out, "- Total expired collations: **{}**\n", total_expired);
+			let _ = writeln!(out, "| Collation State | Count | % | Meaning |");
+			let _ = writeln!(out, "|---|---|---|---|");
+			for (state, count) in &state_counts {
+				let spct = *count as f64 / total_expired as f64 * 100.0;
+				let meaning = match state.as_str() {
+					"created" => "never advertised to validators",
+					"advertised" => "advertised but never fetched by validators",
+					"requested" => "requested but never fetched",
+					"fetched" => "fetched by validators but never backed",
+					"backed" => "backed but never included (availability timeout)",
+					_ => "unknown state",
+				};
+				let _ = writeln!(
+					out,
+					"| {} | **{}** | {:.0}% | {} |",
+					state, count, spct, meaning,
+				);
+			}
+			let _ = writeln!(out);
+		} else if total > 0 {
+			let _ = writeln!(
+				out,
+				"No \"Collation expired\" log entries found for dropped blocks. \
+				Ensure the log level includes `parachain::collator-protocol::stats` at DEBUG.\n"
+			);
+		}
+	}
 }
 
 fn write_sample_data_points(out: &mut String, analysis: &Analysis, config: &ReportConfig) {
@@ -243,6 +297,34 @@ fn write_sample_data_points(out: &mut String, analysis: &Analysis, config: &Repo
 			write_drop_sample(out, drop, config);
 		}
 	}
+}
+
+/// Format a single CollationExpired entry with its full pipeline timeline.
+fn format_collation_expiry_line(ce: &CollationExpired) -> String {
+	let ts_fmt = |t: &chrono::DateTime<chrono::Utc>| t.format("%H:%M:%S%.3f").to_string();
+
+	let age_str = ce.age.map_or(String::new(), |a| format!(", age={}", a));
+	let head_str = ce.head.as_ref().map_or(String::new(), |h| format!(", head={}", h.short()));
+	let produced_str = ce.produced_at
+		.as_ref()
+		.map_or(String::new(), |t| format!(", produced_at={}", ts_fmt(t)));
+	let advertised_str = ce.advertised_at
+		.as_ref()
+		.map_or(String::new(), |t| format!(", advertised_at={}", ts_fmt(t)));
+	let fetched_str = ce.fetched_at
+		.as_ref()
+		.map_or(String::new(), |t| format!(", fetched_at={}", ts_fmt(t)));
+
+	format!(
+		"  - state=**{}**{}{}{}{}{}, expired_at={}",
+		ce.collation_state,
+		age_str,
+		head_str,
+		produced_str,
+		advertised_str,
+		fetched_str,
+		ts_fmt(&ce.timestamp),
+	)
 }
 
 fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfig) {
@@ -376,16 +458,7 @@ fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfi
 		// Show individual entries if there are few enough
 		if drop.collation_expired.len() <= 20 {
 			for ce in &drop.collation_expired {
-				let age_str = ce.age.map_or(String::new(), |a| format!(", age={}", a));
-				let head_str = ce.head.as_ref().map_or(String::new(), |h| format!(", head={}", h.short()));
-				let _ = writeln!(
-					out,
-					"  - state=**{}**{}{} ({})",
-					ce.collation_state,
-					age_str,
-					head_str,
-					ce.timestamp.format("%H:%M:%S%.3f"),
-				);
+				let _ = writeln!(out, "{}", format_collation_expiry_line(ce));
 			}
 		}
 	}
@@ -506,17 +579,120 @@ fn write_multi_collator_section(
 		);
 	}
 
+	// Collation expiry summary across all rebuilds
+	{
+		let mut state_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+		let mut rebuilds_with_expiry = 0usize;
+		let mut total_expired = 0usize;
+		for r in &multi.rebuilds {
+			if !r.collation_expired.is_empty() {
+				rebuilds_with_expiry += 1;
+				for ce in &r.collation_expired {
+					*state_counts.entry(ce.collation_state.clone()).or_insert(0) += 1;
+					total_expired += 1;
+				}
+			}
+		}
+		if total_expired > 0 {
+			let _ = writeln!(out, "### Collation Expiry on Original RP\n");
+			let _ = writeln!(
+				out,
+				"For rebuilds where the original RP's collations expired, what state were they in?\n",
+			);
+			let _ = writeln!(
+				out,
+				"- Rebuilds with collation expiry data: **{}** / {} ({:.0}%)",
+				rebuilds_with_expiry, total,
+				rebuilds_with_expiry as f64 / total as f64 * 100.0,
+			);
+			let _ = writeln!(out, "- Total expired collations: **{}**\n", total_expired);
+			let _ = writeln!(out, "| Collation State | Count | % | Meaning |");
+			let _ = writeln!(out, "|---|---|---|---|");
+			for (state, count) in &state_counts {
+				let spct = *count as f64 / total_expired as f64 * 100.0;
+				let meaning = match state.as_str() {
+					"created" => "never advertised to validators",
+					"advertised" => "advertised but never fetched by validators",
+					"requested" => "requested but never fetched",
+					"fetched" => "fetched by validators but never backed",
+					"backed" => "backed but never included (availability timeout)",
+					_ => "unknown state",
+				};
+				let _ = writeln!(
+					out,
+					"| {} | **{}** | {:.0}% | {} |",
+					state, count, spct, meaning,
+				);
+			}
+			let _ = writeln!(out);
+		}
+	}
+
 	// Slot boundary analysis
 	if let Some(ref sba) = multi.slot_boundary_analysis {
 		write_slot_boundary_section(out, sba, config);
 	}
 
-	// Sample rebuilds
-	let sample_count = multi.rebuilds.len().min(config.max_samples);
-	if sample_count > 0 {
+	// Sample rebuilds — deduplicate by original relay parent so each sample
+	// shows a different incident rather than N blocks from the same stall.
+	let sample_rebuilds: Vec<&RebuildEvent> = {
+		let mut seen_rps: std::collections::BTreeSet<Option<u32>> = std::collections::BTreeSet::new();
+		multi.rebuilds.iter()
+			.filter(|r| seen_rps.insert(r.best_relay_parent))
+			.take(config.max_samples)
+			.collect()
+	};
+	if !sample_rebuilds.is_empty() {
 		let _ = writeln!(out, "### Sample Rebuilds\n");
-		for r in &multi.rebuilds[..sample_count] {
-			let _ = writeln!(out, "#### Block #{} \u{2014} rebuilt on {}", r.block_number, r.observer);
+		for r in &sample_rebuilds {
+			// Incident scope: all rebuilds sharing the same original RP
+			if let Some(brp) = r.best_relay_parent {
+				let incident: Vec<&RebuildEvent> = multi.rebuilds.iter()
+					.filter(|rb| rb.best_relay_parent == Some(brp))
+					.collect();
+				let n_blocks = incident.len();
+
+				// Which collators built on the stale RP
+				let mut collator_counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+				for rb in &incident {
+					let name = rb.best_collator.as_deref().unwrap_or("unknown");
+					*collator_counts.entry(name).or_insert(0) += 1;
+				}
+				let collator_summary: Vec<String> = collator_counts.iter()
+					.map(|(name, count)| format!("{} ({})", name, count))
+					.collect();
+
+				// Time span
+				let first_ts = incident.iter().map(|rb| rb.best_timestamp).min();
+				let last_ts = incident.iter().map(|rb| rb.rebuilt_timestamp).max();
+				let duration_str = match (first_ts, last_ts) {
+					(Some(f), Some(l)) => {
+						let ms = (l - f).num_milliseconds();
+						format!("{:.1}s", ms as f64 / 1000.0)
+					},
+					_ => "?".to_string(),
+				};
+
+				// Block range
+				let min_block = incident.iter().map(|rb| rb.block_number).min().unwrap_or(0);
+				let max_block = incident.iter().map(|rb| rb.block_number).max().unwrap_or(0);
+
+				let _ = writeln!(
+					out,
+					"#### Incident on RP #{} — **{}** blocks rebuilt (#{}\u{2013}#{}), recovery took {}\n",
+					brp, n_blocks, min_block, max_block, duration_str,
+				);
+				let _ = writeln!(
+					out,
+					"Collators that built on stale RP: {}\n",
+					collator_summary.join(", "),
+				);
+			} else {
+				let _ = writeln!(out, "#### Rebuild incident (unknown RP)\n");
+			}
+
+			let _ = writeln!(out, "**First block in batch:**\n");
+			let _ = writeln!(out, "##### Block #{} \u{2014} rebuilt on {}", r.block_number, r.observer);
 
 			let slot_info = |slot: Option<u64>| {
 				slot.map(|s| format!(" slot {}", s)).unwrap_or_default()
@@ -714,16 +890,7 @@ fn write_multi_collator_section(
 				);
 				if r.collation_expired.len() <= 20 {
 					for ce in &r.collation_expired {
-						let age_str = ce.age.map_or(String::new(), |a| format!(", age={}", a));
-						let head_str = ce.head.as_ref().map_or(String::new(), |h| format!(", head={}", h.short()));
-						let _ = writeln!(
-							out,
-							"  - state=**{}**{}{} ({})",
-							ce.collation_state,
-							age_str,
-							head_str,
-							ce.timestamp.format("%H:%M:%S%.3f"),
-						);
+						let _ = writeln!(out, "{}", format_collation_expiry_line(ce));
 					}
 				}
 			}

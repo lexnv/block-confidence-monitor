@@ -3,6 +3,77 @@ use crate::types::*;
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+/// Enrich CollationExpired events with timeline timestamps from the log.
+/// Matches by the `head` hash (para block hash) against:
+/// - PreSealedBlock.post_hash → produced_at
+/// - CollationSubmission.hash → advertised_at
+/// - CollationFetchLatency.para_head → fetched_at
+fn enrich_collation_expired(expired: &mut [CollationExpired], log: &ParsedLog) {
+	for ce in expired.iter_mut() {
+		let head_hash = match &ce.head {
+			Some(h) => h,
+			None => continue,
+		};
+
+		// produced_at: find PreSealedBlock where post_hash matches head
+		for ps in &log.pre_sealed {
+			if hashes_match(head_hash, &ps.post_hash) {
+				ce.produced_at = Some(ps.timestamp);
+				break;
+			}
+		}
+
+		// advertised_at: find CollationSubmission where hash matches head
+		for cs in &log.collation_submissions {
+			if hashes_match(head_hash, &cs.hash) {
+				ce.advertised_at = Some(cs.timestamp);
+				break;
+			}
+		}
+
+		// fetched_at: find CollationFetchLatency where para_head matches head
+		for cf in &log.collation_fetches {
+			if hashes_match(head_hash, &cf.para_head) {
+				ce.fetched_at = Some(cf.timestamp);
+				break;
+			}
+		}
+	}
+}
+
+/// Check if two LogHash values refer to the same hash.
+/// Handles full hashes, truncated "0xabcd…ef01" format, and short prefixes like "0x96c2cfffd0d1".
+fn hashes_match(a: &LogHash, b: &LogHash) -> bool {
+	// Both have full hashes → compare directly
+	if let (Some(fa), Some(fb)) = (&a.full, &b.full) {
+		return fa == fb;
+	}
+	// One has full, other is truncated → use matches_full
+	if let Some(fb) = &b.full {
+		if a.matches_full(fb) {
+			return true;
+		}
+		// Also try prefix matching for short hashes without "…"
+		if !a.raw.contains('…') && a.raw.starts_with("0x") {
+			let full_hex = format!("0x{}", hex::encode(fb));
+			return full_hex.starts_with(&a.raw);
+		}
+		return false;
+	}
+	if let Some(fa) = &a.full {
+		if b.matches_full(fa) {
+			return true;
+		}
+		if !b.raw.contains('…') && b.raw.starts_with("0x") {
+			let full_hex = format!("0x{}", hex::encode(fa));
+			return full_hex.starts_with(&b.raw);
+		}
+		return false;
+	}
+	// Both truncated → compare raw strings (best effort)
+	a.raw == b.raw
+}
+
 /// Information about a locally built parachain block.
 #[derive(Clone, Debug)]
 pub struct BuiltBlock {
@@ -245,10 +316,11 @@ pub async fn detect_and_classify_drops(
 		}
 
 		// Find matching "Collation expired" entries for this block's relay parent
-		let expired: Vec<_> = log.collation_expired.iter()
+		let mut expired: Vec<_> = log.collation_expired.iter()
 			.filter(|ce| ce.relay_parent_num == bb.relay_parent_num)
 			.cloned()
 			.collect();
+		enrich_collation_expired(&mut expired, log);
 
 		dropped.push(DroppedBlock {
 			para_block_number: bb.block_number,
@@ -676,8 +748,8 @@ pub fn analyze_rebuilds(
 				};
 
 				// Find "Collation expired" events matching the original RP
-				// across all collators' logs
-				let collation_expired: Vec<CollationExpired> = if let Some(brp) = best_rp {
+				// across all collators' logs, and enrich with timeline timestamps
+				let mut collation_expired: Vec<CollationExpired> = if let Some(brp) = best_rp {
 					multi.collators.values()
 						.flat_map(|log| log.collation_expired.iter())
 						.filter(|ce| ce.relay_parent_num == brp)
@@ -686,6 +758,10 @@ pub fn analyze_rebuilds(
 				} else {
 					Vec::new()
 				};
+				// Enrich from each collator's log
+				for log in multi.collators.values() {
+					enrich_collation_expired(&mut collation_expired, log);
+				}
 
 				rebuilds.push(RebuildEvent {
 					block_number: *block_number,

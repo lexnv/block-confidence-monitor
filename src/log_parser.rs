@@ -378,6 +378,9 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 						head,
 						candidate_hash,
 						timestamp: ts,
+						produced_at: None,
+						advertised_at: None,
+						fetched_at: None,
 					});
 				}
 			},

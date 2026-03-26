@@ -222,7 +222,15 @@ pub struct CollationExpired {
 	pub head: Option<LogHash>,
 	/// Candidate hash
 	pub candidate_hash: Option<LogHash>,
+	/// Timestamp of the "Collation expired" log entry
 	pub timestamp: DateTime<Utc>,
+	// --- Enriched timeline timestamps (populated during analysis) ---
+	/// When the block was sealed (from Pre-sealed block log)
+	pub produced_at: Option<DateTime<Utc>>,
+	/// When the collation was submitted/advertised (from Submitting collation log)
+	pub advertised_at: Option<DateTime<Utc>>,
+	/// When a validator fetched the collation (from Collation fetch latency log)
+	pub fetched_at: Option<DateTime<Utc>>,
 }
 
 /// All events parsed from the log file, in chronological order.
