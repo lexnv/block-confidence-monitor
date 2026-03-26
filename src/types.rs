@@ -205,6 +205,26 @@ pub struct ViewUpdate {
 	pub timestamp: DateTime<Utc>,
 }
 
+/// A "Collation expired" log event from the collator protocol.
+/// Shows why a collation was not included: the `collation_state` tells us
+/// how far the collation got in the pipeline before it expired.
+#[derive(Clone, Debug)]
+pub struct CollationExpired {
+	/// How far through the pipeline: "created", "advertised", "requested", "fetched", "backed"
+	pub collation_state: String,
+	/// Relay parent block number
+	pub relay_parent_num: u32,
+	/// Relay parent hash (may be truncated)
+	pub relay_parent_hash: LogHash,
+	/// Age in relay blocks when it expired
+	pub age: Option<u32>,
+	/// Para block head hash
+	pub head: Option<LogHash>,
+	/// Candidate hash
+	pub candidate_hash: Option<LogHash>,
+	pub timestamp: DateTime<Utc>,
+}
+
 /// All events parsed from the log file, in chronological order.
 #[derive(Default)]
 pub struct ParsedLog {
@@ -216,6 +236,7 @@ pub struct ParsedLog {
 	pub collation_fetches: Vec<CollationFetchLatency>,
 	pub candidates_generated: Vec<CandidateGenerated>,
 	pub view_updates: Vec<ViewUpdate>,
+	pub collation_expired: Vec<CollationExpired>,
 	pub hash_registry: HashRegistry,
 }
 
@@ -338,6 +359,8 @@ pub struct DroppedBlock {
 	pub reason: DropReason,
 	/// On-chain info for relay blocks near this drop
 	pub nearby_relay_blocks: Vec<OnChainBlockInfo>,
+	/// Matching "Collation expired" log entries for this block's relay parent
+	pub collation_expired: Vec<CollationExpired>,
 }
 
 /// Aggregated analysis results.

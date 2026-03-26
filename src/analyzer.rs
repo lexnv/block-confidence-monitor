@@ -244,6 +244,12 @@ pub async fn detect_and_classify_drops(
 			}
 		}
 
+		// Find matching "Collation expired" entries for this block's relay parent
+		let expired: Vec<_> = log.collation_expired.iter()
+			.filter(|ce| ce.relay_parent_num == bb.relay_parent_num)
+			.cloned()
+			.collect();
+
 		dropped.push(DroppedBlock {
 			para_block_number: bb.block_number,
 			para_block_hash: bb.block_hash.clone(),
@@ -254,6 +260,7 @@ pub async fn detect_and_classify_drops(
 			collation_fetch_latency_ms: bb.collation_fetch_latency_ms,
 			reason,
 			nearby_relay_blocks: nearby,
+			collation_expired: expired,
 		});
 	}
 

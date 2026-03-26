@@ -356,6 +356,40 @@ fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfi
 		}
 	}
 
+	// Collation expiry info
+	if !drop.collation_expired.is_empty() {
+		// Group by collation_state and count
+		let mut state_counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+		for ce in &drop.collation_expired {
+			*state_counts.entry(&ce.collation_state).or_insert(0) += 1;
+		}
+		let summary: Vec<String> = state_counts.iter()
+			.map(|(state, count)| format!("{} x {}", count, state))
+			.collect();
+		let _ = writeln!(
+			out,
+			"- Collation expiry on RP #{}: **{}** collation(s) expired — {}",
+			drop.relay_parent_num,
+			drop.collation_expired.len(),
+			summary.join(", "),
+		);
+		// Show individual entries if there are few enough
+		if drop.collation_expired.len() <= 20 {
+			for ce in &drop.collation_expired {
+				let age_str = ce.age.map_or(String::new(), |a| format!(", age={}", a));
+				let head_str = ce.head.as_ref().map_or(String::new(), |h| format!(", head={}", h.short()));
+				let _ = writeln!(
+					out,
+					"  - state=**{}**{}{} ({})",
+					ce.collation_state,
+					age_str,
+					head_str,
+					ce.timestamp.format("%H:%M:%S%.3f"),
+				);
+			}
+		}
+	}
+
 	let _ = writeln!(out);
 }
 

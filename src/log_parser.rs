@@ -19,6 +19,7 @@ struct Patterns {
 	fetch_latency: Regex,
 	candidate_generated: Regex,
 	view_update: Regex,
+	collation_expired: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -65,6 +66,12 @@ fn patterns() -> &'static Patterns {
 		// Our view updated, current view: OurView { view: View { heads: [...], finalized_number: 30400616 } }
 		view_update: Regex::new(
 			r"Our view updated.*heads:\s*\[([^\]]*)\],\s*finalized_number:\s*(\d+)"
+		).unwrap(),
+
+		// Collation expired age=4 collation_state="advertised" relay_parent=(0xd14e...bf1b, 30511804) para_id=Id(3428) head=0x... candidate_hash=0x...
+		// Fields may have quotes or not depending on tracing subscriber
+		collation_expired: Regex::new(
+			r#"Collation expired\s+age=(\d+)\s+collation_state="?(\w+)"?\s+relay_parent=\(?(0x[0-9a-f]+),?\s*(\d+)\)?"#
 		).unwrap(),
 	})
 }
@@ -124,6 +131,8 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 			7
 		} else if line.contains("Our view updated") {
 			8
+		} else if line.contains("Collation expired") {
+			9
 		} else {
 			0
 		};
@@ -324,6 +333,54 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 					});
 				}
 			},
+			9 => {
+				// Collation expired
+				if let Some(caps) = pat.collation_expired.captures(&line) {
+					let age: u32 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
+					let state = caps.get(2).unwrap().as_str().to_string();
+					let rp_hash_str = caps.get(3).unwrap().as_str();
+					let rp_num: u32 = caps.get(4).unwrap().as_str().parse().unwrap_or(0);
+
+					if !rp_hash_str.contains('…') {
+						log.hash_registry.register_full(rp_hash_str);
+					}
+
+					// Try to extract head and candidate_hash from the rest of the line
+					let head = {
+						static HEAD_RE: OnceLock<Regex> = OnceLock::new();
+						let re = HEAD_RE.get_or_init(|| Regex::new(r"head=(0x[0-9a-f]+)").unwrap());
+						re.captures(&line).map(|c| {
+							let h = c.get(1).unwrap().as_str();
+							if !h.contains('…') {
+								log.hash_registry.register_full(h);
+							}
+							LogHash::from_auto(h)
+						})
+					};
+
+					let candidate_hash = {
+						static CH_RE: OnceLock<Regex> = OnceLock::new();
+						let re = CH_RE.get_or_init(|| Regex::new(r"candidate_hash=(0x[0-9a-f]+)").unwrap());
+						re.captures(&line).map(|c| {
+							let h = c.get(1).unwrap().as_str();
+							if !h.contains('…') {
+								log.hash_registry.register_full(h);
+							}
+							LogHash::from_auto(h)
+						})
+					};
+
+					log.collation_expired.push(CollationExpired {
+						collation_state: state,
+						relay_parent_num: rp_num,
+						relay_parent_hash: LogHash::from_auto(rp_hash_str),
+						age: Some(age),
+						head,
+						candidate_hash,
+						timestamp: ts,
+					});
+				}
+			},
 			_ => {},
 		}
 	}
@@ -339,6 +396,7 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 	log.collation_fetches.reverse();
 	log.candidates_generated.reverse();
 	log.view_updates.reverse();
+	log.collation_expired.reverse();
 
 	tracing::info!(
 		para_imports = log.para_imports.len(),
@@ -348,6 +406,7 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 		collation_submissions = log.collation_submissions.len(),
 		collation_fetches = log.collation_fetches.len(),
 		candidates_generated = log.candidates_generated.len(),
+		collation_expired = log.collation_expired.len(),
 		"Log parsing summary"
 	);
 
