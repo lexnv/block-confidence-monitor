@@ -228,12 +228,50 @@ impl ChainClient {
 					},
 				}
 
+				// Fetch ParaScheduler::ClaimQueue to see if our para is scheduled
+				let claim_queue_cores = retry_async(|| async {
+					let _permit = sem.acquire().await.unwrap();
+					let query = subxt::dynamic::storage("ParaScheduler", "ClaimQueue", ());
+					let result = api
+						.storage()
+						.at(hash)
+						.fetch(&query)
+						.await
+						.map_err(|e| anyhow::anyhow!(e))?;
+					match result {
+						Some(val) => {
+							let decoded = val.to_value().map_err(|e| anyhow::anyhow!(e))?;
+							let cores = extract_claim_queue_for_para(&decoded, para_id);
+							tracing::debug!(
+								block = block_num,
+								?cores,
+								"ClaimQueue result"
+							);
+							Ok(cores)
+						},
+						None => {
+							tracing::debug!(block = block_num, "ClaimQueue storage not found");
+							Ok(Vec::new())
+						},
+					}
+				})
+				.await
+				.unwrap_or_else(|e| {
+					tracing::warn!(
+						block = block_num,
+						error = %e,
+						"ClaimQueue query failed (may not exist on this runtime)"
+					);
+					Vec::new()
+				});
+
 				let info = OnChainBlockInfo {
 					block_number: block_num,
 					block_hash: hash.0,
 					session_index,
 					backed_para_candidates: backed,
 					included_para_candidates: included,
+					claim_queue_cores,
 				};
 
 				(block_num, Some(info))
@@ -443,6 +481,177 @@ fn get_first_value(val: &ScaleValue) -> Option<&ScaleValue> {
 	match &val.value {
 		ValueDef::Composite(composite) => composite.values().next(),
 		_ => None,
+	}
+}
+
+/// Extract core indices assigned to our para from the decoded ClaimQueue value.
+///
+/// ClaimQueue is `BTreeMap<CoreIndex, VecDeque<ParaId>>` decoded by subxt as a
+/// composite of (key, value) tuples. The exact nesting varies by runtime version
+/// and subxt encoding, so we try multiple strategies.
+fn extract_claim_queue_for_para(val: &ScaleValue, our_para_id: u32) -> Vec<u32> {
+	let mut cores = Vec::new();
+
+	// Strategy: walk the top-level composite to find map entries.
+	// Each entry is a 2-tuple: (CoreIndex, VecDeque<ParaId | ParasEntry>).
+	// The top-level value might be a flat Composite of entries, or wrapped
+	// in an extra layer (e.g., for a StorageValue newtype).
+	let entries = collect_map_entries(val);
+
+	if entries.is_empty() {
+		tracing::debug!(
+			"ClaimQueue: found 0 map entries — dumping structure for diagnosis: {:?}",
+			debug_value(val, 0)
+		);
+		return cores;
+	}
+
+	for (key, value) in &entries {
+		let core_index = match extract_u32_recursive(key) {
+			Some(c) => c,
+			None => continue,
+		};
+
+		if value_contains_para_id(value, our_para_id) {
+			cores.push(core_index);
+		}
+	}
+
+	cores
+}
+
+/// Collect (key, value) pairs from a BTreeMap-encoded Value.
+/// SCALE BTreeMap is encoded as Vec<(K, V)>, which subxt decodes as
+/// Composite::Unnamed([Composite::Unnamed([K, V]), ...]).
+/// However, the top-level Value may have additional wrapping.
+fn collect_map_entries(val: &ScaleValue) -> Vec<(&ScaleValue, &ScaleValue)> {
+	// Try to extract entries from the current level
+	if let Some(entries) = try_extract_map_entries(val) {
+		if !entries.is_empty() {
+			return entries;
+		}
+	}
+
+	// Try unwrapping one level (StorageValue wrapper)
+	if let Some(inner) = get_first_value(val) {
+		if let Some(entries) = try_extract_map_entries(inner) {
+			if !entries.is_empty() {
+				return entries;
+			}
+		}
+	}
+
+	Vec::new()
+}
+
+/// Try to extract (key, value) pairs from a composite that represents a Vec of tuples.
+fn try_extract_map_entries(val: &ScaleValue) -> Option<Vec<(&ScaleValue, &ScaleValue)>> {
+	let children: Vec<&ScaleValue> = match &val.value {
+		ValueDef::Composite(composite) => composite.values().collect(),
+		_ => return None,
+	};
+
+	let mut entries = Vec::new();
+	for child in &children {
+		let fields: Vec<&ScaleValue> = match &child.value {
+			ValueDef::Composite(c) => c.values().collect(),
+			_ => continue,
+		};
+		if fields.len() == 2 {
+			entries.push((fields[0], fields[1]));
+		}
+	}
+
+	Some(entries)
+}
+
+/// Recursively check if a Value contains a matching para_id.
+/// Handles both `ParaId(u32)` directly and nested `ParasEntry` structs.
+fn value_contains_para_id(val: &ScaleValue, target_para_id: u32) -> bool {
+	// Direct match
+	if let Some(n) = val.as_u128() {
+		if n as u32 == target_para_id {
+			return true;
+		}
+	}
+
+	// Check named field "para_id"
+	if let ValueDef::Composite(subxt::ext::scale_value::Composite::Named(fields)) = &val.value {
+		for (name, field_val) in fields {
+			if name == "para_id" {
+				if let Some(pid) = extract_u32_recursive(field_val) {
+					if pid == target_para_id {
+						return true;
+					}
+				}
+			}
+		}
+	}
+
+	// Recurse into composite children
+	match &val.value {
+		ValueDef::Composite(composite) => {
+			for child in composite.values() {
+				if value_contains_para_id(child, target_para_id) {
+					return true;
+				}
+			}
+		},
+		// Handle Variant types like Assignment::Bulk(ParaId(3428))
+		ValueDef::Variant(variant) => {
+			for child in variant.values.values() {
+				if value_contains_para_id(child, target_para_id) {
+					return true;
+				}
+			}
+		},
+		_ => {},
+	}
+
+	false
+}
+
+/// Debug helper: produce a compact string representation of a Value's structure.
+fn debug_value(val: &ScaleValue, depth: usize) -> String {
+	if depth > 4 {
+		return "...".to_string();
+	}
+	match &val.value {
+		ValueDef::Composite(subxt::ext::scale_value::Composite::Named(fields)) => {
+			let inner: Vec<String> = fields
+				.iter()
+				.take(3)
+				.map(|(name, v)| format!("{}: {}", name, debug_value(v, depth + 1)))
+				.collect();
+			let suffix = if fields.len() > 3 {
+				format!(", ..+{}", fields.len() - 3)
+			} else {
+				String::new()
+			};
+			format!("Named({}){}", inner.join(", "), suffix)
+		},
+		ValueDef::Composite(subxt::ext::scale_value::Composite::Unnamed(values)) => {
+			let inner: Vec<String> = values
+				.iter()
+				.take(3)
+				.map(|v| debug_value(v, depth + 1))
+				.collect();
+			let suffix = if values.len() > 3 {
+				format!(", ..+{}", values.len() - 3)
+			} else {
+				String::new()
+			};
+			format!("Unnamed[{}]({}{})", values.len(), inner.join(", "), suffix)
+		},
+		_ => {
+			if let Some(n) = val.as_u128() {
+				format!("u128({})", n)
+			} else if let Some(b) = val.as_bool() {
+				format!("bool({})", b)
+			} else {
+				format!("{:?}", val.value)
+			}
+		},
 	}
 }
 

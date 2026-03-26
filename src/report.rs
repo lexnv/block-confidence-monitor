@@ -324,14 +324,22 @@ fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfi
 				String::new()
 			};
 
+			let schedule_note = if info.claim_queue_cores.is_empty() {
+				" — **not scheduled**".to_string()
+			} else {
+				let cores: Vec<String> = info.claim_queue_cores.iter().map(|c| c.to_string()).collect();
+				format!(" — scheduled on core(s) {}", cores.join(", "))
+			};
+
 			let _ = writeln!(
 				out,
-				"  - #{} ({}): {}{}{}",
+				"  - #{} ({}): {}{}{}{}",
 				info.block_number,
 				hash_short,
 				backed_info,
 				included_info,
-				session_note
+				session_note,
+				schedule_note,
 			);
 		}
 	}
@@ -581,14 +589,23 @@ fn write_multi_collator_section(
 						format!(", includes {}", range_summary(&included_decoded, n_included))
 					};
 
+					// ClaimQueue scheduling status
+					let schedule_summary = if info.claim_queue_cores.is_empty() {
+						" — **not scheduled**".to_string()
+					} else {
+						let cores: Vec<String> = info.claim_queue_cores.iter().map(|c| c.to_string()).collect();
+						format!(" — scheduled on core(s) {}", cores.join(", "))
+					};
+
 					let _ = writeln!(
 						out,
-						"  - [#{}]({}) ({}): {}{}",
+						"  - [#{}]({}) ({}): {}{}{}",
 						info.block_number,
 						pjs_link,
 						hash_short,
 						backed_summary,
 						included_summary,
+						schedule_summary,
 					);
 
 					// Detail lines: comma-separated on a single line per category
@@ -604,6 +621,20 @@ fn write_multi_collator_section(
 							.collect();
 						let _ = writeln!(out, "    - included {}", items.join(", "));
 					}
+				}
+
+				// Scheduling summary for the viability window
+				let total_rc_blocks = r.relay_block_sequence.len();
+				let scheduled_count = r.relay_block_sequence.iter()
+					.filter(|info| !info.claim_queue_cores.is_empty())
+					.count();
+				let unscheduled_count = total_rc_blocks - scheduled_count;
+				if total_rc_blocks > 0 && unscheduled_count > 0 {
+					let _ = writeln!(
+						out,
+						"- Scheduling: para was scheduled in {}/{} relay blocks in this range ({} unscheduled)",
+						scheduled_count, total_rc_blocks, unscheduled_count,
+					);
 				}
 			}
 			let _ = writeln!(out);

@@ -269,6 +269,9 @@ pub struct OnChainBlockInfo {
 	pub session_index: u32,
 	pub backed_para_candidates: Vec<ParaCandidateEvent>,
 	pub included_para_candidates: Vec<ParaCandidateEvent>,
+	/// Core indices where our para is in the ClaimQueue at this relay block.
+	/// Empty means the para was not scheduled on any core.
+	pub claim_queue_cores: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
