@@ -591,12 +591,18 @@ fn write_multi_collator_section(
 						included_summary,
 					);
 
-					// Detail lines: individual block number + hash
-					for (n, bh) in &backed_decoded {
-						let _ = writeln!(out, "    - backed #{} {}", n, bh);
+					// Detail lines: comma-separated on a single line per category
+					if !backed_decoded.is_empty() {
+						let items: Vec<String> = backed_decoded.iter()
+							.map(|(n, bh)| format!("#{} {}", n, bh))
+							.collect();
+						let _ = writeln!(out, "    - backed {}", items.join(", "));
 					}
-					for (n, bh) in &included_decoded {
-						let _ = writeln!(out, "    - included #{} {}", n, bh);
+					if !included_decoded.is_empty() {
+						let items: Vec<String> = included_decoded.iter()
+							.map(|(n, bh)| format!("#{} {}", n, bh))
+							.collect();
+						let _ = writeln!(out, "    - included {}", items.join(", "));
 					}
 				}
 			}
