@@ -473,6 +473,9 @@ pub struct RebuildEvent {
 	pub on_chain_winner: OnChainWinner,
 	/// Relay chain block sequence between the best and rebuilt relay parents.
 	pub relay_block_sequence: Vec<OnChainBlockInfo>,
+	/// "Collation expired" log entries matching the original (best) relay parent.
+	/// Shows what happened to the tail collations on the old RP that never got backed.
+	pub collation_expired: Vec<CollationExpired>,
 }
 
 /// Which block at a given height was included on-chain.

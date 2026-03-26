@@ -694,6 +694,40 @@ fn write_multi_collator_section(
 					);
 				}
 			}
+
+			// Collation expiry info for the original (best) RP
+			if !r.collation_expired.is_empty() {
+				let mut state_counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+				for ce in &r.collation_expired {
+					*state_counts.entry(&ce.collation_state).or_insert(0) += 1;
+				}
+				let summary: Vec<String> = state_counts.iter()
+					.map(|(state, count)| format!("{} x {}", count, state))
+					.collect();
+				let rp_label = r.best_relay_parent.map_or("?".to_string(), |rp| format!("{}", rp));
+				let _ = writeln!(
+					out,
+					"- Collation expiry on original RP #{}: **{}** collation(s) expired — {}",
+					rp_label,
+					r.collation_expired.len(),
+					summary.join(", "),
+				);
+				if r.collation_expired.len() <= 20 {
+					for ce in &r.collation_expired {
+						let age_str = ce.age.map_or(String::new(), |a| format!(", age={}", a));
+						let head_str = ce.head.as_ref().map_or(String::new(), |h| format!(", head={}", h.short()));
+						let _ = writeln!(
+							out,
+							"  - state=**{}**{}{} ({})",
+							ce.collation_state,
+							age_str,
+							head_str,
+							ce.timestamp.format("%H:%M:%S%.3f"),
+						);
+					}
+				}
+			}
+
 			let _ = writeln!(out);
 		}
 	}

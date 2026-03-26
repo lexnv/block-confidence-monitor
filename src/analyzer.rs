@@ -675,6 +675,18 @@ pub fn analyze_rebuilds(
 					_ => Vec::new(),
 				};
 
+				// Find "Collation expired" events matching the original RP
+				// across all collators' logs
+				let collation_expired: Vec<CollationExpired> = if let Some(brp) = best_rp {
+					multi.collators.values()
+						.flat_map(|log| log.collation_expired.iter())
+						.filter(|ce| ce.relay_parent_num == brp)
+						.cloned()
+						.collect()
+				} else {
+					Vec::new()
+				};
+
 				rebuilds.push(RebuildEvent {
 					block_number: *block_number,
 					block_hash_best: best.block_hash.clone(),
@@ -691,6 +703,7 @@ pub fn analyze_rebuilds(
 					cause,
 					on_chain_winner,
 					relay_block_sequence,
+					collation_expired,
 				});
 			}
 		}
