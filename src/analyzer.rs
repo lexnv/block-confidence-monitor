@@ -766,7 +766,9 @@ pub fn analyze_rebuilds(
 				rebuilds.push(RebuildEvent {
 					block_number: *block_number,
 					block_hash_best: best.block_hash.clone(),
+					parent_hash_best: best.parent_hash.clone(),
 					block_hash_rebuilt: rebuilt.block_hash.clone(),
+					parent_hash_rebuilt: rebuilt.parent_hash.clone(),
 					best_collator,
 					rebuilt_collator,
 					best_timestamp: best.timestamp,

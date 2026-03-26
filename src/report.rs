@@ -700,8 +700,9 @@ fn write_multi_collator_section(
 
 			let _ = writeln!(
 				out,
-				"- Original best: {} (built by {} at {}{}{})",
+				"- Original best: {} (parent: {}, built by {} at {}{}{})",
 				r.block_hash_best.short(),
+				r.parent_hash_best.short(),
 				r.best_collator.as_deref().unwrap_or("unknown"),
 				r.best_timestamp.format("%H:%M:%S%.3f"),
 				r.best_relay_parent
@@ -711,8 +712,9 @@ fn write_multi_collator_section(
 			);
 			let _ = writeln!(
 				out,
-				"- Replacement: {} (built by {} at {}{}{})",
+				"- Replacement: {} (parent: {}, built by {} at {}{}{})",
 				r.block_hash_rebuilt.short(),
+				r.parent_hash_rebuilt.short(),
 				r.rebuilt_collator.as_deref().unwrap_or("unknown"),
 				r.rebuilt_timestamp.format("%H:%M:%S%.3f"),
 				r.rebuilt_relay_parent

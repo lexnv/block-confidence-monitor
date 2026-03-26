@@ -455,8 +455,12 @@ pub struct RebuildEvent {
 	pub block_number: u32,
 	/// The 🏆 block that was originally best on the observing collator.
 	pub block_hash_best: LogHash,
+	/// Parent hash of the original best block.
+	pub parent_hash_best: LogHash,
 	/// The 🆕 block that replaced it.
 	pub block_hash_rebuilt: LogHash,
+	/// Parent hash of the replacement block.
+	pub parent_hash_rebuilt: LogHash,
 	/// Which collator built the original best block (from cross-referencing Pre-sealed events).
 	pub best_collator: Option<String>,
 	/// Which collator built the replacement block.
