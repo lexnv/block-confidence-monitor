@@ -321,6 +321,7 @@ pub async fn detect_and_classify_drops(
 			.cloned()
 			.collect();
 		enrich_collation_expired(&mut expired, log);
+		expired.sort_by(|a, b| a.produced_at.cmp(&b.produced_at));
 
 		dropped.push(DroppedBlock {
 			para_block_number: bb.block_number,
@@ -762,6 +763,7 @@ pub fn analyze_rebuilds(
 				for log in multi.collators.values() {
 					enrich_collation_expired(&mut collation_expired, log);
 				}
+				collation_expired.sort_by(|a, b| a.produced_at.cmp(&b.produced_at));
 
 				rebuilds.push(RebuildEvent {
 					block_number: *block_number,
