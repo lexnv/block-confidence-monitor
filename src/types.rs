@@ -545,11 +545,36 @@ pub struct SlotBoundaryAnalysis {
 	pub relay_parent_gaps: usize,
 }
 
+/// A case where 2+ different collators built the same para block number
+/// on the same relay parent. This would indicate a protocol-level issue
+/// (Aura slot assignment violation or similar).
+#[derive(Clone, Debug)]
+pub struct DuplicateBlockOnSameRP {
+	/// The para block height that was produced by multiple collators.
+	pub block_number: u32,
+	/// The relay parent number both collators built on.
+	pub relay_parent_num: u32,
+	/// Each collator that produced this block: (name, slot, timestamp).
+	pub producers: Vec<DuplicateProducer>,
+}
+
+/// One producer in a duplicate block production event.
+#[derive(Clone, Debug)]
+pub struct DuplicateProducer {
+	pub collator: String,
+	pub slot: u64,
+	pub timestamp: chrono::DateTime<chrono::Utc>,
+	pub block_hash: LogHash,
+}
+
 /// Summary of rebuild analysis across all collators.
 pub struct MultiCollatorAnalysis {
 	pub per_collator: Vec<CollatorStats>,
 	pub rebuilds: Vec<RebuildEvent>,
 	pub slot_boundary_analysis: Option<SlotBoundaryAnalysis>,
+	/// Cases where 2+ different collators built the same block number on the
+	/// same relay parent. Empty means clean slot assignment (expected).
+	pub duplicate_blocks_same_rp: Vec<DuplicateBlockOnSameRP>,
 }
 
 /// Inline hex module to avoid adding a dependency.

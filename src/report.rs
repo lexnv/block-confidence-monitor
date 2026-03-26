@@ -39,6 +39,7 @@ pub fn generate_multi_collator_report(
 	// Use the primary (first) collator's confidence for the main table
 	write_confidence(&mut out, primary_log);
 	write_multi_collator_section(&mut out, multi_analysis, config);
+	write_duplicate_block_section(&mut out, multi_analysis);
 	write_summary(&mut out, analysis, config);
 	write_session_boundary_section(&mut out, analysis, config);
 	write_non_session_section(&mut out, analysis, config);
@@ -598,6 +599,93 @@ fn write_multi_collator_section(
 						let _ = writeln!(out, "    - included #{} {}", n, bh);
 					}
 				}
+			}
+			let _ = writeln!(out);
+		}
+	}
+}
+
+fn write_duplicate_block_section(
+	out: &mut String,
+	multi: &MultiCollatorAnalysis,
+) {
+	let _ = writeln!(out, "## Duplicate Block Production Check\n");
+	let _ = writeln!(
+		out,
+		"Checks whether 2+ different collators ever built the same para block number \
+		on the same relay parent. This would indicate a protocol-level issue \
+		(e.g. Aura slot assignment violation or shared collator keys).\n"
+	);
+
+	let dupes = &multi.duplicate_blocks_same_rp;
+
+	if dupes.is_empty() {
+		let _ = writeln!(
+			out,
+			"**No duplicates found.** Every (block number, relay parent) pair was produced \
+			by exactly one collator. Slot assignment is clean.\n"
+		);
+		return;
+	}
+
+	let _ = writeln!(
+		out,
+		"**WARNING: {} case(s)** where different collators built the same block on the same RP:\n",
+		dupes.len()
+	);
+
+	let _ = writeln!(out, "| Block # | Relay Parent | Collators | Slots | Time Gap |");
+	let _ = writeln!(out, "|---|---|---|---|---|");
+
+	for dupe in dupes {
+		let mut producers = dupe.producers.clone();
+		producers.sort_by_key(|p| p.timestamp);
+
+		let collators: Vec<&str> = producers.iter().map(|p| p.collator.as_str()).collect();
+		let slots: Vec<String> = producers.iter().map(|p| format!("{}", p.slot)).collect();
+
+		let time_gap = if producers.len() >= 2 {
+			let first = producers.first().unwrap().timestamp;
+			let last = producers.last().unwrap().timestamp;
+			let gap_ms = (last - first).num_milliseconds();
+			format!("{}ms", gap_ms)
+		} else {
+			"-".to_string()
+		};
+
+		let _ = writeln!(
+			out,
+			"| {} | #{} | {} | {} | {} |",
+			dupe.block_number,
+			dupe.relay_parent_num,
+			collators.join(", "),
+			slots.join(", "),
+			time_gap,
+		);
+	}
+	let _ = writeln!(out);
+
+	// Detailed samples (up to 5)
+	let sample_count = dupes.len().min(5);
+	if sample_count > 0 {
+		let _ = writeln!(out, "### Duplicate Production Details\n");
+		for dupe in &dupes[..sample_count] {
+			let _ = writeln!(
+				out,
+				"#### Block #{} on RP #{}\n",
+				dupe.block_number, dupe.relay_parent_num
+			);
+			let mut producers = dupe.producers.clone();
+			producers.sort_by_key(|p| p.timestamp);
+			for p in &producers {
+				let _ = writeln!(
+					out,
+					"- **{}**: slot {} at {} — hash {}",
+					p.collator,
+					p.slot,
+					p.timestamp.format("%H:%M:%S%.3f"),
+					p.block_hash.short(),
+				);
 			}
 			let _ = writeln!(out);
 		}

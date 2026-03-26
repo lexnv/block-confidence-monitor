@@ -709,7 +709,20 @@ pub fn analyze_rebuilds(
 	// Slot boundary analysis
 	let slot_boundary_analysis = Some(analyze_slot_boundaries(multi));
 
-	MultiCollatorAnalysis { per_collator, rebuilds, slot_boundary_analysis }
+	// Duplicate block production on same RP detection
+	let duplicate_blocks_same_rp =
+		detect_duplicate_blocks_same_rp(multi, &rp_and_slot_for_sealed);
+
+	if duplicate_blocks_same_rp.is_empty() {
+		tracing::info!("No duplicate block production on the same RP detected (clean slot assignment)");
+	} else {
+		tracing::warn!(
+			count = duplicate_blocks_same_rp.len(),
+			"Detected duplicate block production on the same RP by different collators!"
+		);
+	}
+
+	MultiCollatorAnalysis { per_collator, rebuilds, slot_boundary_analysis, duplicate_blocks_same_rp }
 }
 
 /// Analyze slot boundary transitions across all collators.
@@ -900,6 +913,68 @@ pub fn analyze_slot_boundaries(multi: &MultiCollatorLogs) -> SlotBoundaryAnalysi
 		max_overlap_count,
 		relay_parent_gaps,
 	}
+}
+
+/// Detect cases where 2+ different collators built the same para block number
+/// on the same relay parent. This would indicate a protocol-level issue (e.g.
+/// Aura slot assignment violation, or two collators sharing the same key).
+fn detect_duplicate_blocks_same_rp(
+	multi: &MultiCollatorLogs,
+	rp_and_slot_for_sealed: &HashMap<(String, String), (u32, u64)>,
+) -> Vec<DuplicateBlockOnSameRP> {
+	// Build: (block_number, relay_parent_num) → Vec<DuplicateProducer>
+	let mut by_block_rp: BTreeMap<(u32, u32), Vec<DuplicateProducer>> = BTreeMap::new();
+
+	for (name, log) in &multi.collators {
+		// Group building attempts by slot for RP lookup
+		let mut rp_by_slot: BTreeMap<u64, u32> = BTreeMap::new();
+		for ba in &log.build_attempts {
+			if ba.building {
+				rp_by_slot.entry(ba.slot).or_insert(ba.relay_parent_num);
+			}
+		}
+
+		for ps in &log.pre_sealed {
+			let hash_key = full_hash_key(&ps.post_hash);
+
+			// Look up the RP and slot for this sealed block
+			let (rp, slot) = if let Some(&(rp, slot)) =
+				rp_and_slot_for_sealed.get(&(name.clone(), hash_key))
+			{
+				(rp, slot)
+			} else {
+				continue;
+			};
+
+			let producer = DuplicateProducer {
+				collator: name.clone(),
+				slot,
+				timestamp: ps.timestamp,
+				block_hash: ps.post_hash.clone(),
+			};
+
+			by_block_rp
+				.entry((ps.block_number, rp))
+				.or_default()
+				.push(producer);
+		}
+	}
+
+	// Filter to only entries where 2+ *different* collators produced
+	let mut results: Vec<DuplicateBlockOnSameRP> = Vec::new();
+	for ((block_number, relay_parent_num), producers) in by_block_rp {
+		let unique_collators: BTreeSet<&str> =
+			producers.iter().map(|p| p.collator.as_str()).collect();
+		if unique_collators.len() >= 2 {
+			results.push(DuplicateBlockOnSameRP {
+				block_number,
+				relay_parent_num,
+				producers,
+			});
+		}
+	}
+
+	results
 }
 
 /// Classify the root cause of a rebuild.
