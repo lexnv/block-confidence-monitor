@@ -289,10 +289,22 @@ fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfi
 			let backed_info = if info.backed_para_candidates.is_empty() {
 				"no backed candidates for our para".to_string()
 			} else {
+				let mut groups: Vec<u32> = info.backed_para_candidates.iter()
+					.filter_map(|c| c.group_index)
+					.collect();
+				groups.sort();
+				groups.dedup();
+				let group_note = if groups.is_empty() {
+					String::new()
+				} else {
+					let g: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+					format!(" (group(s) {})", g.join(", "))
+				};
 				format!(
-					"backs {} candidate(s) for para {}",
+					"backs {} candidate(s) for para {}{}",
 					info.backed_para_candidates.len(),
-					config.para_id
+					config.para_id,
+					group_note,
 				)
 			};
 
@@ -580,7 +592,18 @@ fn write_multi_collator_section(
 					let backed_summary = if n_backed == 0 {
 						"no backed candidates for our para".to_string()
 					} else {
-						format!("backs {}", range_summary(&backed_decoded, n_backed))
+						let mut groups: Vec<u32> = info.backed_para_candidates.iter()
+							.filter_map(|c| c.group_index)
+							.collect();
+						groups.sort();
+						groups.dedup();
+						let group_note = if groups.is_empty() {
+							String::new()
+						} else {
+							let g: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+							format!(" [group(s) {}]", g.join(", "))
+						};
+						format!("backs {}{}", range_summary(&backed_decoded, n_backed), group_note)
 					};
 
 					let included_summary = if n_included == 0 {
