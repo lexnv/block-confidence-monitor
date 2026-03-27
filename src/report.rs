@@ -10,6 +10,7 @@ pub struct ReportConfig {
 	#[allow(dead_code)]
 	pub rpc_url: String,
 	pub n_collators: usize,
+	pub detailed: bool,
 }
 
 pub fn generate_report(
@@ -44,6 +45,10 @@ pub fn generate_multi_collator_report(
 	write_session_boundary_section(&mut out, analysis, config);
 	write_non_session_section(&mut out, analysis, config);
 	write_sample_data_points(&mut out, analysis, config);
+
+	if config.detailed {
+		write_detailed_incident_chains(&mut out, multi_analysis);
+	}
 
 	out
 }
@@ -1087,6 +1092,156 @@ fn write_slot_boundary_section(
 			);
 		}
 		let _ = writeln!(out);
+	}
+}
+
+/// Detailed incident chain visualization.
+///
+/// Groups rebuild incidents by consecutive relay parents into chains, then
+/// renders each chain as an indented tree showing the cascade of collators
+/// building on each other's expired collations.
+fn write_detailed_incident_chains(out: &mut String, multi: &MultiCollatorAnalysis) {
+	let _ = writeln!(out, "## Detailed Incident Chains\n");
+
+	// Group rebuilds by best_relay_parent → incident
+	let mut incidents: std::collections::BTreeMap<u32, Vec<&RebuildEvent>> =
+		std::collections::BTreeMap::new();
+	for r in &multi.rebuilds {
+		if let Some(brp) = r.best_relay_parent {
+			incidents.entry(brp).or_default().push(r);
+		}
+	}
+
+	if incidents.is_empty() {
+		let _ = writeln!(out, "No rebuild incidents found.\n");
+		return;
+	}
+
+	// Detect chains: consecutive RPs form a chain
+	let rps: Vec<u32> = incidents.keys().copied().collect();
+	let mut chains: Vec<Vec<u32>> = Vec::new();
+	let mut current_chain: Vec<u32> = Vec::new();
+
+	for &rp in &rps {
+		if current_chain.is_empty() || rp == *current_chain.last().unwrap() + 1 {
+			current_chain.push(rp);
+		} else {
+			chains.push(std::mem::take(&mut current_chain));
+			current_chain.push(rp);
+		}
+	}
+	if !current_chain.is_empty() {
+		chains.push(current_chain);
+	}
+
+	let ts_fmt = |t: &chrono::DateTime<chrono::Utc>| t.format("%H:%M:%S").to_string();
+
+	for (chain_idx, chain) in chains.iter().enumerate() {
+		// Get the first incident's representative rebuild event for root info
+		let first_incident = &incidents[&chain[0]];
+		let first_rebuild = first_incident[0];
+		let root_parent = first_rebuild.parent_hash_best.short();
+
+		let total_blocks: usize = chain.iter()
+			.map(|rp| incidents[rp][0].collation_expired.len())
+			.sum();
+		let total_collators = chain.len();
+
+		let _ = writeln!(
+			out,
+			"### Chain {} — {} collator(s), {} expired collations across RP #{}\u{2013}#{}\n",
+			chain_idx + 1,
+			total_collators,
+			total_blocks,
+			chain.first().unwrap(),
+			chain.last().unwrap(),
+		);
+		let _ = writeln!(out, "```");
+		let _ = writeln!(out, "root parent = {}", root_parent);
+
+		for (depth, &rp) in chain.iter().enumerate() {
+			let incident = &incidents[&rp];
+			let repr = incident[0];
+			let expired = &repr.collation_expired;
+			let collator_name = repr.best_collator.as_deref().unwrap_or("unknown");
+			let n_blocks = expired.len();
+
+			// Time range from produced_at (already sorted)
+			let first_produced = expired.iter().filter_map(|ce| ce.produced_at.as_ref()).min();
+			let last_produced = expired.iter().filter_map(|ce| ce.produced_at.as_ref()).max();
+			let time_range = match (first_produced, last_produced) {
+				(Some(f), Some(l)) => format!("{} \u{2013} {}", ts_fmt(f), ts_fmt(l)),
+				_ => "?".to_string(),
+			};
+
+			// State summary
+			let mut state_counts: std::collections::BTreeMap<&str, usize> =
+				std::collections::BTreeMap::new();
+			for ce in expired {
+				*state_counts.entry(&ce.collation_state).or_insert(0) += 1;
+			}
+			let state_summary: String = if state_counts.len() == 1 {
+				let (state, _) = state_counts.iter().next().unwrap();
+				format!("all {}", state)
+			} else {
+				state_counts
+					.iter()
+					.map(|(state, count)| format!("{} {}", count, state))
+					.collect::<Vec<_>>()
+					.join(", ")
+			};
+
+			// Indentation: 4 spaces per depth level
+			let indent = "    ".repeat(depth);
+			let connector = if depth == 0 { "|--" } else { "|--" };
+
+			let _ = writeln!(
+				out,
+				"{}{} {}: {} blocks ({}) [{}]",
+				indent, connector, collator_name, n_blocks, time_range, state_summary,
+			);
+
+			// Show individual block heads on RP line
+			let block_indent = format!("{}    ", indent);
+			let block_entries: Vec<String> = expired.iter().map(|ce| {
+				let head = ce.head.as_ref()
+					.map(|h| h.short().to_string())
+					.unwrap_or_else(|| "?".to_string());
+				let state = ce.collation_state.to_uppercase();
+				format!("{} ({})", head, state)
+			}).collect();
+
+			// Show blocks: if <= 6 show all, otherwise first 3 + ... + last 1
+			if block_entries.len() <= 6 {
+				let _ = writeln!(out, "{}blocks: {}", block_indent, block_entries.join(", "));
+			} else {
+				let head: Vec<&str> = block_entries[..3].iter().map(|s| s.as_str()).collect();
+				let tail = &block_entries[block_entries.len() - 1];
+				let _ = writeln!(
+					out,
+					"{}blocks: {}, ... {}", block_indent, head.join(", "), tail,
+				);
+			}
+		}
+
+		// Show the replacement that resolved the chain
+		let first_rebuild = incidents[&chain[0]][0];
+		let slot_info = first_rebuild.rebuilt_slot
+			.map(|s| format!(" slot {}", s))
+			.unwrap_or_default();
+		let _ = writeln!(
+			out,
+			"  |=> replaced by {} (parent: {}, by {} at {}{}{})  ",
+			first_rebuild.block_hash_rebuilt.short(),
+			first_rebuild.parent_hash_rebuilt.short(),
+			first_rebuild.rebuilt_collator.as_deref().unwrap_or("unknown"),
+			first_rebuild.rebuilt_timestamp.format("%H:%M:%S%.3f"),
+			first_rebuild.rebuilt_relay_parent
+				.map(|rp| format!(" on RP #{}", rp))
+				.unwrap_or_default(),
+			slot_info,
+		);
+		let _ = writeln!(out, "```\n");
 	}
 }
 

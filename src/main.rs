@@ -49,6 +49,10 @@ struct Cli {
 	/// Chain name for the report header (default: "Relay Chain")
 	#[arg(long, default_value = "Relay Chain")]
 	chain_name: String,
+
+	/// Show detailed incident chain visualization at the end of the report
+	#[arg(long)]
+	detailed: bool,
 }
 
 #[tokio::main]
@@ -144,6 +148,7 @@ async fn run_single_collator(cli: &Cli, log_file: &PathBuf) -> Result<()> {
 		para_id: cli.para_id,
 		rpc_url: cli.rpc_url.clone(),
 		n_collators: 1,
+		detailed: cli.detailed,
 	};
 
 	let report_text = report::generate_report(&analysis, &report_config, &parsed);
@@ -259,6 +264,7 @@ async fn run_multi_collator(cli: &Cli, log_dir: &PathBuf) -> Result<()> {
 		para_id: cli.para_id,
 		rpc_url: cli.rpc_url.clone(),
 		n_collators: multi.collators.len(),
+		detailed: cli.detailed,
 	};
 
 	let report_text = report::generate_multi_collator_report(
