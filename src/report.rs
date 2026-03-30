@@ -1259,22 +1259,17 @@ fn write_detailed_incident_chains(out: &mut String, multi: &MultiCollatorAnalysi
 		);
 		let _ = writeln!(out, "```\n");
 
-		// Collect validator peers from the first expired collation of each depth level
-		let mut all_peers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-		for &rp in chain {
-			let repr = incidents[&rp][0];
-			if let Some(first_ce) = repr.collation_expired.first() {
-				for p in &first_ce.advertised_to_peers {
-					all_peers.insert(p);
+		// Show validator peers from the first collator's first candidate only
+		// (that's the backing group that should have backed the original block)
+		let first_repr = incidents[&chain[0]][0];
+		if let Some(first_ce) = first_repr.collation_expired.first() {
+			if !first_ce.advertised_to_peers.is_empty() {
+				let _ = writeln!(out, "**Validator peers (backing group):**");
+				for peer in &first_ce.advertised_to_peers {
+					let _ = writeln!(out, "- `{}`", peer);
 				}
+				let _ = writeln!(out);
 			}
-		}
-		if !all_peers.is_empty() {
-			let _ = writeln!(out, "**Validator peers (backing group):**");
-			for peer in &all_peers {
-				let _ = writeln!(out, "- `{}`", peer);
-			}
-			let _ = writeln!(out);
 		}
 	}
 }
