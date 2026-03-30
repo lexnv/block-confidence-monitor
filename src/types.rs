@@ -231,6 +231,8 @@ pub struct CollationExpired {
 	pub advertised_at: Option<DateTime<Utc>>,
 	/// When a validator fetched the collation (from Collation fetch latency log)
 	pub fetched_at: Option<DateTime<Utc>>,
+	/// Validator peer IDs this candidate was advertised to (from "Advertising collation" logs)
+	pub advertised_to_peers: Vec<String>,
 }
 
 /// All events parsed from the log file, in chronological order.
@@ -245,6 +247,8 @@ pub struct ParsedLog {
 	pub candidates_generated: Vec<CandidateGenerated>,
 	pub view_updates: Vec<ViewUpdate>,
 	pub collation_expired: Vec<CollationExpired>,
+	/// candidate_hash (raw string) → set of validator peer_ids advertised to
+	pub advertising_peers: std::collections::HashMap<String, std::collections::BTreeSet<String>>,
 	pub hash_registry: HashRegistry,
 }
 

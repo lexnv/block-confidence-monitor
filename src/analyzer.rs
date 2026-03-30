@@ -38,6 +38,13 @@ fn enrich_collation_expired(expired: &mut [CollationExpired], log: &ParsedLog) {
 				break;
 			}
 		}
+
+		// advertised_to_peers: look up by candidate_hash in advertising_peers map
+		if let Some(ch) = &ce.candidate_hash {
+			if let Some(peers) = log.advertising_peers.get(&ch.raw) {
+				ce.advertised_to_peers = peers.iter().cloned().collect();
+			}
+		}
 	}
 }
 

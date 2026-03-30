@@ -310,6 +310,7 @@ fn format_collation_expiry_line(ce: &CollationExpired) -> String {
 
 	let age_str = ce.age.map_or(String::new(), |a| format!(", age={}", a));
 	let head_str = ce.head.as_ref().map_or(String::new(), |h| format!(", head={}", h.short()));
+	let candidate_str = ce.candidate_hash.as_ref().map_or(String::new(), |h| format!(", candidate={}", h.raw));
 	let produced_str = ce.produced_at
 		.as_ref()
 		.map_or(String::new(), |t| format!(", produced_at={}", ts_fmt(t)));
@@ -321,10 +322,11 @@ fn format_collation_expiry_line(ce: &CollationExpired) -> String {
 		.map_or(String::new(), |t| format!(", fetched_at={}", ts_fmt(t)));
 
 	format!(
-		"  - state=**{}**{}{}{}{}{}, expired_at={}",
+		"  - state=**{}**{}{}{}{}{}{}, expired_at={}",
 		ce.collation_state,
 		age_str,
 		head_str,
+		candidate_str,
 		produced_str,
 		advertised_str,
 		fetched_str,
@@ -1203,12 +1205,26 @@ fn write_detailed_incident_chains(out: &mut String, multi: &MultiCollatorAnalysi
 
 			// Show individual block heads on RP line
 			let block_indent = format!("{}    ", indent);
-			let block_entries: Vec<String> = expired.iter().map(|ce| {
+			let block_entries: Vec<String> = expired.iter().enumerate().map(|(i, ce)| {
 				let head = ce.head.as_ref()
 					.map(|h| h.short().to_string())
 					.unwrap_or_else(|| "?".to_string());
 				let state = ce.collation_state.to_uppercase();
-				format!("{} ({})", head, state)
+				if i == 0 {
+					let ts_fmt = |t: &chrono::DateTime<chrono::Utc>| t.format("%H:%M:%S%.3f").to_string();
+					let candidate = ce.candidate_hash.as_ref()
+						.map(|h| h.raw.as_str())
+						.unwrap_or("?");
+					let produced = ce.produced_at.as_ref()
+						.map_or(String::new(), |t| format!(", produced={}", ts_fmt(t)));
+					let advertised = ce.advertised_at.as_ref()
+						.map_or(String::new(), |t| format!(", advertised={}", ts_fmt(t)));
+					let fetched = ce.fetched_at.as_ref()
+						.map_or(String::new(), |t| format!(", fetched={}", ts_fmt(t)));
+					format!("{} ({}) [candidate: {}{}{}{}]", head, state, candidate, produced, advertised, fetched)
+				} else {
+					format!("{} ({})", head, state)
+				}
 			}).collect();
 
 			// Show blocks: if <= 6 show all, otherwise first 3 + ... + last 1
@@ -1242,6 +1258,24 @@ fn write_detailed_incident_chains(out: &mut String, multi: &MultiCollatorAnalysi
 			slot_info,
 		);
 		let _ = writeln!(out, "```\n");
+
+		// Collect validator peers from the first expired collation of each depth level
+		let mut all_peers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+		for &rp in chain {
+			let repr = incidents[&rp][0];
+			if let Some(first_ce) = repr.collation_expired.first() {
+				for p in &first_ce.advertised_to_peers {
+					all_peers.insert(p);
+				}
+			}
+		}
+		if !all_peers.is_empty() {
+			let _ = writeln!(out, "**Validator peers (backing group):**");
+			for peer in &all_peers {
+				let _ = writeln!(out, "- `{}`", peer);
+			}
+			let _ = writeln!(out);
+		}
 	}
 }
 

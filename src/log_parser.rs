@@ -20,6 +20,7 @@ struct Patterns {
 	candidate_generated: Regex,
 	view_update: Regex,
 	collation_expired: Regex,
+	advertising_collation: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -72,6 +73,11 @@ fn patterns() -> &'static Patterns {
 		// Fields may have quotes or not depending on tracing subscriber
 		collation_expired: Regex::new(
 			r#"Collation expired\s+age=(\d+)\s+collation_state="?(\w+)"?\s+relay_parent=\(?(0x[0-9a-f]+),?\s*(\d+)\)?"#
+		).unwrap(),
+
+		// Advertising collation. scheduling_parent=0x... candidate_hash=0x... peer_id=12D3KooW...
+		advertising_collation: Regex::new(
+			r"Advertising collation\.\s+scheduling_parent=(0x[0-9a-f]+)\s+candidate_hash=(0x[0-9a-f]+)\s+peer_id=(\S+)"
 		).unwrap(),
 	})
 }
@@ -133,6 +139,8 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 			8
 		} else if line.contains("Collation expired") {
 			9
+		} else if line.contains("Advertising collation") {
+			10
 		} else {
 			0
 		};
@@ -381,7 +389,19 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 						produced_at: None,
 						advertised_at: None,
 						fetched_at: None,
+						advertised_to_peers: Vec::new(),
 					});
+				}
+			},
+			10 => {
+				// Advertising collation → collect peer_ids per candidate_hash
+				if let Some(caps) = pat.advertising_collation.captures(&line) {
+					let candidate_hash = caps.get(2).unwrap().as_str().to_string();
+					let peer_id = caps.get(3).unwrap().as_str().to_string();
+					log.advertising_peers
+						.entry(candidate_hash)
+						.or_default()
+						.insert(peer_id);
 				}
 			},
 			_ => {},
@@ -410,6 +430,7 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 		collation_fetches = log.collation_fetches.len(),
 		candidates_generated = log.candidates_generated.len(),
 		collation_expired = log.collation_expired.len(),
+		advertising_candidates = log.advertising_peers.len(),
 		"Log parsing summary"
 	);
 
