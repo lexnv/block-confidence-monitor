@@ -182,6 +182,15 @@ pub struct CollationSubmission {
 }
 
 #[derive(Clone, Debug)]
+pub struct PeerConnectionEvent {
+	pub peer_id: String,
+	pub connected: bool,
+	/// Only present for PeerConnected events
+	pub role: Option<String>,
+	pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
 pub struct CollationFetchLatency {
 	pub latency_ms: u64,
 	pub para_head: LogHash, // full
@@ -249,6 +258,8 @@ pub struct ParsedLog {
 	pub collation_expired: Vec<CollationExpired>,
 	/// candidate_hash (raw string) → set of validator peer_ids advertised to
 	pub advertising_peers: std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+	/// PeerConnected / PeerDisconnected events on the Collation peer set
+	pub peer_connections: Vec<PeerConnectionEvent>,
 	pub hash_registry: HashRegistry,
 }
 

@@ -21,6 +21,8 @@ struct Patterns {
 	view_update: Regex,
 	collation_expired: Regex,
 	advertising_collation: Regex,
+	peer_connected: Regex,
+	peer_disconnected: Regex,
 }
 
 fn patterns() -> &'static Patterns {
@@ -78,6 +80,16 @@ fn patterns() -> &'static Patterns {
 		// Advertising collation. scheduling_parent=0x... candidate_hash=0x... peer_id=12D3KooW...
 		advertising_collation: Regex::new(
 			r"Advertising collation\.\s+scheduling_parent=(0x[0-9a-f]+)\s+candidate_hash=(0x[0-9a-f]+)\s+peer_id=(\S+)"
+		).unwrap(),
+
+		// action="PeerConnected" peer_set=Collation version=2 peer=PeerId("12D3KooW...") role=Authority
+		peer_connected: Regex::new(
+			r#"action="PeerConnected"\s+peer_set=Collation\s+version=\d+\s+peer=PeerId\("([^"]+)"\)\s+role=(\w+)"#
+		).unwrap(),
+
+		// action="PeerDisconnected" peer_set=Collation peer=PeerId("12D3KooW...")
+		peer_disconnected: Regex::new(
+			r#"action="PeerDisconnected"\s+peer_set=Collation\s+peer=PeerId\("([^"]+)"\)"#
 		).unwrap(),
 	})
 }
@@ -141,6 +153,10 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 			9
 		} else if line.contains("Advertising collation") {
 			10
+		} else if line.contains("PeerConnected") && line.contains("peer_set=Collation") {
+			11
+		} else if line.contains("PeerDisconnected") && line.contains("peer_set=Collation") {
+			12
 		} else {
 			0
 		};
@@ -404,6 +420,28 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 						.insert(peer_id);
 				}
 			},
+			11 => {
+				// PeerConnected on Collation peer set
+				if let Some(caps) = pat.peer_connected.captures(&line) {
+					log.peer_connections.push(PeerConnectionEvent {
+						peer_id: caps.get(1).unwrap().as_str().to_string(),
+						connected: true,
+						role: Some(caps.get(2).unwrap().as_str().to_string()),
+						timestamp: ts,
+					});
+				}
+			},
+			12 => {
+				// PeerDisconnected on Collation peer set
+				if let Some(caps) = pat.peer_disconnected.captures(&line) {
+					log.peer_connections.push(PeerConnectionEvent {
+						peer_id: caps.get(1).unwrap().as_str().to_string(),
+						connected: false,
+						role: None,
+						timestamp: ts,
+					});
+				}
+			},
 			_ => {},
 		}
 	}
@@ -420,6 +458,7 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 	log.candidates_generated.reverse();
 	log.view_updates.reverse();
 	log.collation_expired.reverse();
+	log.peer_connections.reverse();
 
 	tracing::info!(
 		para_imports = log.para_imports.len(),
@@ -431,6 +470,7 @@ pub fn parse_log(path: &Path, para_id: u32) -> Result<ParsedLog> {
 		candidates_generated = log.candidates_generated.len(),
 		collation_expired = log.collation_expired.len(),
 		advertising_candidates = log.advertising_peers.len(),
+		peer_connections = log.peer_connections.len(),
 		"Log parsing summary"
 	);
 

@@ -272,6 +272,7 @@ async fn run_multi_collator(cli: &Cli, log_dir: &PathBuf) -> Result<()> {
 		&report_config,
 		&multi_analysis,
 		primary_log,
+		&multi,
 	);
 
 	// Phase 7: Output

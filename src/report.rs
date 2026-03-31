@@ -34,6 +34,7 @@ pub fn generate_multi_collator_report(
 	config: &ReportConfig,
 	multi_analysis: &MultiCollatorAnalysis,
 	primary_log: &ParsedLog,
+	multi_logs: &MultiCollatorLogs,
 ) -> String {
 	let mut out = String::with_capacity(16384);
 
@@ -47,7 +48,7 @@ pub fn generate_multi_collator_report(
 	write_sample_data_points(&mut out, analysis, config);
 
 	if config.detailed {
-		write_detailed_incident_chains(&mut out, multi_analysis);
+		write_detailed_incident_chains(&mut out, multi_analysis, multi_logs);
 	}
 
 	out
@@ -1102,7 +1103,7 @@ fn write_slot_boundary_section(
 /// Groups rebuild incidents by consecutive relay parents into chains, then
 /// renders each chain as an indented tree showing the cascade of collators
 /// building on each other's expired collations.
-fn write_detailed_incident_chains(out: &mut String, multi: &MultiCollatorAnalysis) {
+fn write_detailed_incident_chains(out: &mut String, multi: &MultiCollatorAnalysis, multi_logs: &MultiCollatorLogs) {
 	let _ = writeln!(out, "## Detailed Incident Chains\n");
 
 	// Group rebuilds by best_relay_parent → incident
@@ -1262,13 +1263,75 @@ fn write_detailed_incident_chains(out: &mut String, multi: &MultiCollatorAnalysi
 		// Show validator peers from the first collator's first candidate only
 		// (that's the backing group that should have backed the original block)
 		let first_repr = incidents[&chain[0]][0];
-		if let Some(first_ce) = first_repr.collation_expired.first() {
-			if !first_ce.advertised_to_peers.is_empty() {
-				let _ = writeln!(out, "**Validator peers (backing group):**");
-				for peer in &first_ce.advertised_to_peers {
-					let _ = writeln!(out, "- `{}`", peer);
+		let backing_peers: Vec<String> = first_repr.collation_expired.first()
+			.map(|ce| ce.advertised_to_peers.clone())
+			.unwrap_or_default();
+
+		if !backing_peers.is_empty() {
+			let _ = writeln!(out, "**Validator peers (backing group):**");
+			for peer in &backing_peers {
+				let _ = writeln!(out, "- `{}`", peer);
+			}
+			let _ = writeln!(out);
+		}
+
+		// Show peer connection/disconnection timeline for backing group validators
+		if !backing_peers.is_empty() {
+			// Determine time window: chain start - 15s to replacement + 5s
+			let chain_start = chain.iter()
+				.flat_map(|rp| incidents[rp].iter())
+				.flat_map(|r| r.collation_expired.iter())
+				.filter_map(|ce| ce.produced_at)
+				.min();
+			let chain_end = incidents[&chain[0]][0].rebuilt_timestamp;
+
+			if let Some(start) = chain_start {
+				let window_start = start - chrono::Duration::seconds(15);
+				let window_end = chain_end + chrono::Duration::seconds(5);
+
+				// Collect which collators are involved in this chain
+				let collators_in_chain: Vec<&str> = chain.iter()
+					.flat_map(|rp| incidents[rp].iter())
+					.filter_map(|r| r.best_collator.as_deref())
+					.collect::<std::collections::BTreeSet<_>>()
+					.into_iter()
+					.collect();
+
+				let _ = writeln!(out, "**Peer connection timeline (Collation peer set, {}–{}):**\n",
+					window_start.format("%H:%M:%S"),
+					window_end.format("%H:%M:%S"),
+				);
+
+				let peer_set: std::collections::BTreeSet<&str> = backing_peers.iter()
+					.map(|s| s.as_str())
+					.collect();
+
+				for collator_name in &collators_in_chain {
+					if let Some(log) = multi_logs.collators.get(*collator_name) {
+						let mut events: Vec<_> = log.peer_connections.iter()
+							.filter(|ev| peer_set.contains(ev.peer_id.as_str()))
+							.filter(|ev| ev.timestamp >= window_start && ev.timestamp <= window_end)
+							.collect();
+						events.sort_by_key(|ev| ev.timestamp);
+
+						if !events.is_empty() {
+							let _ = writeln!(out, "*{}:*", collator_name);
+							for ev in &events {
+								let action = if ev.connected { "Connected" } else { "Disconnected" };
+								let role_str = ev.role.as_deref()
+									.map(|r| format!(" ({})", r))
+									.unwrap_or_default();
+								let _ = writeln!(out, "- `{}` {} `{}`{}",
+									ev.timestamp.format("%H:%M:%S%.3f"),
+									action,
+									ev.peer_id,
+									role_str,
+								);
+							}
+							let _ = writeln!(out);
+						}
+					}
 				}
-				let _ = writeln!(out);
 			}
 		}
 	}
