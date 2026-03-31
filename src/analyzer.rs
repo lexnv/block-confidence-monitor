@@ -32,9 +32,12 @@ fn enrich_collation_expired(expired: &mut [CollationExpired], log: &ParsedLog) {
 		}
 
 		// fetched_at: find CollationFetchLatency where para_head matches head
+		// Multiple validators may fetch the same collation, so keep the earliest.
 		for cf in &log.collation_fetches {
 			if hashes_match(head_hash, &cf.para_head) {
-				ce.fetched_at = Some(cf.timestamp);
+				if ce.fetched_at.is_none() || Some(cf.timestamp) < ce.fetched_at {
+					ce.fetched_at = Some(cf.timestamp);
+				}
 				break;
 			}
 		}
