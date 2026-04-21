@@ -11,6 +11,7 @@ pub struct ReportConfig {
 	pub rpc_url: String,
 	pub n_collators: usize,
 	pub detailed: bool,
+	pub session_boundaries_only: bool,
 }
 
 pub fn generate_report(
@@ -19,6 +20,12 @@ pub fn generate_report(
 	log: &ParsedLog,
 ) -> String {
 	let mut out = String::with_capacity(8192);
+
+	if config.session_boundaries_only {
+		write_session_boundary_section(&mut out, analysis, config);
+		write_session_boundary_samples(&mut out, analysis, config);
+		return out;
+	}
 
 	write_confidence(&mut out, log);
 	write_summary(&mut out, analysis, config);
@@ -37,6 +44,12 @@ pub fn generate_multi_collator_report(
 	multi_logs: &MultiCollatorLogs,
 ) -> String {
 	let mut out = String::with_capacity(16384);
+
+	if config.session_boundaries_only {
+		write_session_boundary_section(&mut out, analysis, config);
+		write_session_boundary_samples(&mut out, analysis, config);
+		return out;
+	}
 
 	// Use the primary (first) collator's confidence for the main table
 	write_confidence(&mut out, primary_log);
@@ -264,6 +277,25 @@ fn write_non_session_section(out: &mut String, analysis: &Analysis, _config: &Re
 				Ensure the log level includes `parachain::collator-protocol::stats` at DEBUG.\n"
 			);
 		}
+	}
+}
+
+fn write_session_boundary_samples(
+	out: &mut String,
+	analysis: &Analysis,
+	config: &ReportConfig,
+) {
+	if analysis.session_boundary_drops.is_empty() {
+		return;
+	}
+	let _ = writeln!(out, "## Sample data points");
+	let _ = writeln!(out, "### Session boundary drops");
+	let samples = &analysis.session_boundary_drops[..analysis
+		.session_boundary_drops
+		.len()
+		.min(config.max_samples)];
+	for drop in samples {
+		write_drop_sample(out, drop, config);
 	}
 }
 

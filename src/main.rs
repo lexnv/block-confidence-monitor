@@ -53,6 +53,10 @@ struct Cli {
 	/// Show detailed incident chain visualization at the end of the report
 	#[arg(long)]
 	detailed: bool,
+
+	/// Show only the session boundary issue count and samples; suppress all other sections
+	#[arg(long)]
+	session_boundaries_only: bool,
 }
 
 #[tokio::main]
@@ -149,6 +153,7 @@ async fn run_single_collator(cli: &Cli, log_file: &PathBuf) -> Result<()> {
 		rpc_url: cli.rpc_url.clone(),
 		n_collators: 1,
 		detailed: cli.detailed,
+		session_boundaries_only: cli.session_boundaries_only,
 	};
 
 	let report_text = report::generate_report(&analysis, &report_config, &parsed);
@@ -265,6 +270,7 @@ async fn run_multi_collator(cli: &Cli, log_dir: &PathBuf) -> Result<()> {
 		rpc_url: cli.rpc_url.clone(),
 		n_collators: multi.collators.len(),
 		detailed: cli.detailed,
+		session_boundaries_only: cli.session_boundaries_only,
 	};
 
 	let report_text = report::generate_multi_collator_report(
