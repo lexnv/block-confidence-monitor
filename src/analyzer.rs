@@ -426,66 +426,87 @@ fn classify_drop(
 ) -> DropReason {
 	let rp = bb.relay_parent_num;
 
-	// 1. Check for session boundary
-	for &(boundary_block, session_before, session_after) in session_boundaries {
-		// If the session boundary falls within the viability window of this block's RP
-		if boundary_block > rp && boundary_block <= rp + viability_window + 1 {
-			return DropReason::SessionBoundary {
-				session_before,
-				session_after,
-				boundary_relay_block: boundary_block,
+	// 1. Wrong fork — the relay parent we built on isn't the canonical block at
+	//    that height. The fork was pruned, so the candidate had no chance of
+	//    being backed on the canonical relay chain regardless of session timing.
+	//    Checked first because it's the most specific evidence.
+	if let Some(on_chain_block) = on_chain.get(&rp) {
+		let canonical = on_chain_block.block_hash;
+		let on_canonical = if let Some(rp_full) = &bb.relay_parent_hash.full {
+			*rp_full == canonical
+		} else if bb.relay_parent_hash.matches_full(&canonical) {
+			true
+		} else {
+			// Truncated and pattern didn't match — try resolving via the registry.
+			// If we can't resolve, conservatively assume canonical (don't over-classify).
+			log.hash_registry
+				.resolve(&bb.relay_parent_hash.raw)
+				.map(|r| r == canonical)
+				.unwrap_or(true)
+		};
+		if !on_canonical {
+			return DropReason::WrongFork {
+				relay_parent_num: rp,
+				relay_parent_hash: bb.relay_parent_hash.clone(),
 			};
 		}
 	}
 
-	// 2. Check for wrong fork
-	// Compare the relay parent hash from the log with the canonical hash from on-chain
-	if let Some(on_chain_block) = on_chain.get(&rp) {
-		let canonical_hash = on_chain_block.block_hash;
-		if let Some(ref rp_full) = bb.relay_parent_hash.full {
-			if rp_full != &canonical_hash {
-				return DropReason::WrongFork {
-					relay_parent_num: rp,
-					relay_parent_hash: bb.relay_parent_hash.clone(),
-				};
-			}
-		} else {
-			// Truncated hash — try to match
-			if !bb.relay_parent_hash.matches_full(&canonical_hash) {
-				// Could be wrong fork or just can't match
-				// Only classify as wrong fork if we're confident
-				let resolved = log.hash_registry.resolve(&bb.relay_parent_hash.raw);
-				if let Some(resolved_hash) = resolved {
-					if resolved_hash != canonical_hash {
-						return DropReason::WrongFork {
-							relay_parent_num: rp,
-							relay_parent_hash: bb.relay_parent_hash.clone(),
-						};
-					}
-				}
-			}
+	// 2. Session boundary — the candidate was built speculatively on a relay
+	//    parent whose session ended before the viability window closed. The
+	//    relay chain refuses to back candidates whose relay parent is in a
+	//    prior session, so once the collator imported a new-session relay
+	//    block it discarded the unincluded segment rooted in the old session.
+	//
+	//    Required evidence (so we don't tag every drop near a boundary):
+	//    (a) RP is strictly older than the new-session block AND the change
+	//        falls within the viability window after the RP (otherwise the
+	//        candidate would have already expired naturally).
+	//    (b) The collator first imported a new-session relay block AFTER it
+	//        built this candidate — i.e., it was unaware of the upcoming
+	//        session change when it built. This is the speculative-build-
+	//        then-discard pattern. If the collator was already aware and
+	//        still built on an old-session RP, that's a different bug.
+	//
+	//    If we never see a new-session import in the log window, we still
+	//    classify as session boundary: the relay-chain constraint applies
+	//    regardless of what the collator log captured locally.
+	for &(boundary_block, session_before, session_after) in session_boundaries {
+		if rp >= boundary_block || boundary_block > rp + viability_window + 1 {
+			continue;
 		}
-	}
-
-	// 3. Check for relay parent expired
-	// Look at the relay blocks in the viability window: did any of them back our candidate?
-	let mut any_backed = false;
-	for offset in 1..=viability_window {
-		if let Some(info) = on_chain.get(&(rp + offset)) {
-			if !info.backed_para_candidates.is_empty() {
-				any_backed = true;
-				break;
-			}
+		let observed_new_session_at = log
+			.relay_imports
+			.iter()
+			.filter(|ri| ri.block_number >= boundary_block)
+			.map(|ri| ri.timestamp)
+			.min();
+		let built_before_observation = match observed_new_session_at {
+			Some(t) => bb.built_at <= t,
+			None => true,
+		};
+		if built_before_observation {
+			return DropReason::SessionBoundary {
+				session_before,
+				session_after,
+				boundary_relay_block: boundary_block,
+				collator_observed_at: observed_new_session_at,
+			};
 		}
+		tracing::debug!(
+			para_block = bb.block_number,
+			relay_parent = rp,
+			boundary_block,
+			built_at = %bb.built_at,
+			observed_new_session_at = ?observed_new_session_at,
+			"Drop near session boundary but collator had already observed the new session; \
+			 falling through to relay-parent-expired"
+		);
 	}
 
-	if !any_backed {
-		return DropReason::RelayParentExpired { relay_parent_num: rp, viability_window };
-	}
-
-	// If some blocks backed but the candidate still wasn't included, it might be
-	// that a *different* candidate was backed (e.g., a competing fork).
-	// Still classify as relay parent expired since the specific candidate expired.
+	// 3. Relay parent expired — RP stayed on the canonical chain and no
+	//    session change cut the viability window short, yet the candidate
+	//    wasn't backed before the window closed.
 	DropReason::RelayParentExpired { relay_parent_num: rp, viability_window }
 }
 

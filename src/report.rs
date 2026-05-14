@@ -385,6 +385,30 @@ fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfi
 		let _ = writeln!(out, "- Collation fetch latency: **{}ms**", latency);
 	}
 
+	// Session-boundary specific evidence: when did the collator observe the
+	// new session relative to when this block was built?
+	if let DropReason::SessionBoundary { collator_observed_at, boundary_relay_block, .. } = &drop.reason {
+		match collator_observed_at {
+			Some(observed) => {
+				let gap_ms = (*observed - drop.built_at).num_milliseconds();
+				let _ = writeln!(
+					out,
+					"- Collator imported new-session relay block #{} at {} (**{}ms after** sealing this block)",
+					boundary_relay_block,
+					observed.format("%H:%M:%S%.3f"),
+					gap_ms,
+				);
+			},
+			None => {
+				let _ = writeln!(
+					out,
+					"- Collator did not import a new-session relay block within the log window — \
+					 classification rests on the relay-chain rule alone",
+				);
+			},
+		}
+	}
+
 	// Relay parent info
 	let _ = writeln!(
 		out,

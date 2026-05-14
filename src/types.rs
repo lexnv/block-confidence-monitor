@@ -335,6 +335,11 @@ pub enum DropReason {
 		session_before: u32,
 		session_after: u32,
 		boundary_relay_block: u32,
+		/// When the collator first imported a relay block in the new session.
+		/// `None` if no new-session import was captured within the log window —
+		/// in that case the classification rests on the relay-chain constraint
+		/// alone, without local collator-side evidence.
+		collator_observed_at: Option<DateTime<Utc>>,
 	},
 	RelayParentExpired {
 		relay_parent_num: u32,
@@ -350,7 +355,7 @@ pub enum DropReason {
 impl fmt::Display for DropReason {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::SessionBoundary { session_before, session_after, boundary_relay_block } =>
+			Self::SessionBoundary { session_before, session_after, boundary_relay_block, .. } =>
 				write!(
 					f,
 					"Session boundary (session {} → {} at relay block #{})",
