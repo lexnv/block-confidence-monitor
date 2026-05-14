@@ -481,27 +481,57 @@ fn classify_drop(
 			.filter(|ri| ri.block_number >= boundary_block)
 			.map(|ri| ri.timestamp)
 			.min();
-		let built_before_observation = match observed_new_session_at {
+
+		// (a) Speculative build: the block was sealed before the collator
+		//     imported any new-session relay block (or no such import was
+		//     captured in the log window).
+		let built_speculatively = match observed_new_session_at {
 			Some(t) => bb.built_at <= t,
 			None => true,
 		};
-		if built_before_observation {
-			return DropReason::SessionBoundary {
-				session_before,
-				session_after,
-				boundary_relay_block: boundary_block,
-				collator_observed_at: observed_new_session_at,
-			};
+		if !built_speculatively {
+			tracing::debug!(
+				para_block = bb.block_number,
+				relay_parent = rp,
+				boundary_block,
+				built_at = %bb.built_at,
+				observed_new_session_at = ?observed_new_session_at,
+				"Drop near session boundary but collator had already observed the new session; \
+				 not a speculative-build pattern"
+			);
+			continue;
 		}
-		tracing::debug!(
-			para_block = bb.block_number,
-			relay_parent = rp,
-			boundary_block,
-			built_at = %bb.built_at,
-			observed_new_session_at = ?observed_new_session_at,
-			"Drop near session boundary but collator had already observed the new session; \
-			 falling through to relay-parent-expired"
-		);
+
+		// (b) Discard: after observing the new session, the collator did NOT
+		//     try to build a child of this block. If a BuildAttempt with this
+		//     block as its parent fired post-observation, the collator was
+		//     still extending the old-session chain — relay-chain physics
+		//     would still drop the candidate, but this is not the local
+		//     collator-side discard pattern. Fall through in that case.
+		if let Some(t) = observed_new_session_at {
+			let extended_after_observation = log.build_attempts.iter().any(|ba| {
+				ba.building
+					&& ba.timestamp > t
+					&& hashes_match(&ba.parent, &bb.block_hash)
+			});
+			if extended_after_observation {
+				tracing::debug!(
+					para_block = bb.block_number,
+					relay_parent = rp,
+					boundary_block,
+					"Drop near session boundary but collator extended this block \
+					 after observing the new session; not a discard pattern"
+				);
+				continue;
+			}
+		}
+
+		return DropReason::SessionBoundary {
+			session_before,
+			session_after,
+			boundary_relay_block: boundary_block,
+			collator_observed_at: observed_new_session_at,
+		};
 	}
 
 	// 3. Relay parent expired — RP stayed on the canonical chain and no

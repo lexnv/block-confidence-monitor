@@ -386,7 +386,8 @@ fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfi
 	}
 
 	// Session-boundary specific evidence: when did the collator observe the
-	// new session relative to when this block was built?
+	// new session relative to when this block was built, and is there local
+	// evidence that the chain past this block was abandoned (discarded)?
 	if let DropReason::SessionBoundary { collator_observed_at, boundary_relay_block, .. } = &drop.reason {
 		match collator_observed_at {
 			Some(observed) => {
@@ -398,12 +399,16 @@ fn write_drop_sample(out: &mut String, drop: &DroppedBlock, config: &ReportConfi
 					observed.format("%H:%M:%S%.3f"),
 					gap_ms,
 				);
+				let _ = writeln!(
+					out,
+					"- Discard confirmed: no `BuildAttempt` with this block as parent fired after the observation"
+				);
 			},
 			None => {
 				let _ = writeln!(
 					out,
 					"- Collator did not import a new-session relay block within the log window — \
-					 classification rests on the relay-chain rule alone",
+					 classification rests on the relay-chain rule alone (no local discard evidence)",
 				);
 			},
 		}
